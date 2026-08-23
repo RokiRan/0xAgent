@@ -277,29 +277,34 @@
       word-break: break-word;
     }
 
-    /* Rendered markdown */
+    /* Rendered markdown — compact, chat-like density.
+       white-space:normal is REQUIRED: .message-body sets pre-wrap, and
+       marked emits "\n" between block elements — inherited pre-wrap renders
+       each as a real blank line, doubling the gaps. */
+    .message-text { line-height: 1.5; white-space: normal; }
     .message-text > :first-child { margin-top: 0; }
     .message-text > :last-child { margin-bottom: 0; }
-    .message-text p { margin: 8px 0; }
+    .message-text p { margin: 3px 0; }
     .message-text h1, .message-text h2, .message-text h3,
     .message-text h4, .message-text h5, .message-text h6 {
-      margin: 14px 0 8px;
+      margin: 8px 0 3px;
       line-height: 1.3;
       color: var(--text);
     }
-    .message-text h1 { font-size: 20px; }
-    .message-text h2 { font-size: 17px; }
-    .message-text h3 { font-size: 15px; }
+    .message-text h1 { font-size: 16px; }
+    .message-text h2 { font-size: 15px; }
+    .message-text h3 { font-size: 14px; }
     .message-text h4, .message-text h5, .message-text h6 { font-size: 14px; }
     .message-text ul, .message-text ol {
-      margin: 8px 0;
-      padding-left: 24px;
+      margin: 3px 0;
+      padding-left: 20px;
     }
-    .message-text li { margin: 4px 0; }
-    .message-text li > ul, .message-text li > ol { margin: 4px 0; }
+    .message-text li { margin: 1px 0; }
+    .message-text li > p { margin: 0; }
+    .message-text li > ul, .message-text li > ol { margin: 1px 0; }
     .message-text blockquote {
-      margin: 8px 0;
-      padding: 4px 12px;
+      margin: 4px 0;
+      padding: 4px 10px;
       border-left: 3px solid var(--border);
       color: var(--text-secondary);
     }
@@ -308,24 +313,24 @@
     .message-text hr {
       border: none;
       border-top: 1px solid var(--border);
-      margin: 12px 0;
+      margin: 8px 0;
     }
     .message-text table {
       border-collapse: collapse;
-      margin: 8px 0;
+      margin: 3px 0;
       font-size: 13px;
     }
     .message-text th, .message-text td {
       border: 1px solid var(--border);
-      padding: 6px 10px;
+      padding: 3px 8px;
     }
     .message-text th { background: var(--bg-tertiary); }
     .message-text pre {
       background: var(--bg-tertiary);
-      padding: 12px;
+      padding: 8px 10px;
       border-radius: var(--radius);
       overflow-x: auto;
-      margin: 8px 0;
+      margin: 4px 0;
     }
     .message-text pre code {
       background: none;
@@ -524,6 +529,7 @@
       font-weight: 600;
       border-bottom: 1px solid var(--border);
     }
+    .task-panel-actions { display: flex; gap: 6px; }
 
     .task-create {
       padding: 10px 14px;
@@ -840,7 +846,10 @@
       <div class="task-panel hidden" id="taskPanel">
         <div class="task-panel-header">
           <span>任务板</span>
-          <button class="room-add-btn" onclick="refreshTasks()" title="刷新">↻</button>
+          <span class="task-panel-actions">
+            <button class="room-add-btn" onclick="refreshTasks()" title="刷新">↻</button>
+            <button class="room-add-btn" onclick="toggleTaskPanel()" title="关闭">✕</button>
+          </span>
         </div>
         <div class="task-create">
           <input id="taskTitle" placeholder="任务标题" />
@@ -1336,6 +1345,9 @@
       div.appendChild(content);
       msgs.appendChild(div);
       msgs.scrollTop = msgs.scrollHeight;
+      // Advance the think-duration baseline (mirrors renderItem): without this
+      // room messages measured against a stale thread-render timestamp.
+      lastActivityAt = m.ts ?? Date.now();
     }
     function renderThread(thread) {
       document.getElementById('threadTitle').textContent = threadTitleOf(thread);

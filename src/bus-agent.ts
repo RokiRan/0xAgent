@@ -72,7 +72,12 @@ async function shouldInterject(text: string, from: string, context: string[] = [
   const res = await model.generate([
     {
       role: 'system',
-      content: `你是群聊中的 agent「${agentId}」，运行在 ${os.hostname()}。${persona ? `你的专长：${persona}。` : ''}判断是否回应这条群聊消息：话题明显属于你的专长范围、或向你求助 → YES；与你专长无关的话题、寒暄闲聊 → NO；拿不准 → NO。只回答 YES 或 NO。`,
+      content: `你是群聊中的 agent「${agentId}」，运行在 ${os.hostname()}。${persona ? `你的专长：${persona}。` : ''}判断是否回应这条群聊消息。
+
+回应（YES）仅当：被点名/被提问，或你能提供前序发言中没有的实质性增量（纠错、关键补充、明确分歧）。
+沉默（NO）当：话题与你专长无关；别人的回答已经完整；你只想表示赞同或总结（附和是噪声）；你最近已经发过言且讨论正在收敛；拿不准。
+
+只回答 YES 或 NO。`,
     },
     { role: 'user', content: `${contextBlock(context)}${from}: ${text}` },
   ]);

@@ -609,8 +609,9 @@ export function createRegistryServer(port = 9876): Server {
               sendJson(409, { held: true, reason: 'freshness', unseen, token: newToken });
               return;
             }
-            // Two-tier loop floor (cumora §6.7): human present → adaptive high cap
-            // max(20, μ+2σ) over completed rounds; human absent → strict lapping.
+            // Two-tier loop floor (cumora §6.7, tuned): human present → bounded
+            // discussion cap (6/round; a discussion round ≈ 2-3 agents × 2 exchanges);
+            // human absent → strict lapping.
             const speakers = new Set(st.speakers).add(msg.from);
             const humanPresent = now - st.lastHumanAt < 10 * 60 * 1000;
             let cap = speakers.size;
@@ -618,9 +619,9 @@ export function createRegistryServer(port = 9876): Server {
               if (st.rounds.length >= 3) {
                 const mean = st.rounds.reduce((a, b) => a + b, 0) / st.rounds.length;
                 const variance = st.rounds.reduce((a, b) => a + (b - mean) ** 2, 0) / st.rounds.length;
-                cap = Math.max(20, Math.ceil(mean + 2 * Math.sqrt(variance)));
+                cap = Math.max(6, Math.ceil(mean + 2 * Math.sqrt(variance)));
               } else {
-                cap = 20;
+                cap = 6;
               }
             }
             if (st.agentMsgs + 1 > cap) {
