@@ -42,6 +42,11 @@
       grid-template-columns: 0 1fr;
     }
 
+    /* display:none removes .sidebar from grid auto-placement, which would
+       shift .main into the 0-width first track — pin both explicitly. */
+    .sidebar { grid-column: 1; }
+    .main { grid-column: 2; }
+
     .app.sidebar-hidden .sidebar {
       display: none;
     }
