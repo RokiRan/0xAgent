@@ -9,7 +9,9 @@
 import { HarnessV2, HarnessV2Config } from './harness-v2.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { BusGateway } from './appserver/bus-gateway.js';
+import Database from 'better-sqlite3';
+import { BusGateway, RoomMessage } from './appserver/bus-gateway.js';
+import { TaskBoard } from './appserver/task-board.js';
 import { createResponse, createError, createNotification, JsonRpcRequest } from './appserver/protocol.js';
 
 function loadEnvConfig(): Partial<HarnessV2Config> {
@@ -83,10 +85,34 @@ const REGISTRY_URL = process.env.BUS_REGISTRY_URL;
 let busGateway: BusGateway | undefined;
 if (REGISTRY_URL && harness.server) {
   const appServer = harness.server;
+
+  // Room chat persistence (second connection to the same DB file; sync driver serializes)
+  const chatDb = new Database(DB_PATH);
+  chatDb.exec(`CREATE TABLE IF NOT EXISTS room_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    ts INTEGER NOT NULL
+  )`);
+  chatDb.exec('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room, id)');
+  const insertMsg = chatDb.prepare('INSERT INTO room_messages (room, sender, kind, text, ts) VALUES (?, ?, ?, ?, ?)');
+  const loadMsg = chatDb.prepare('SELECT room, sender, kind, text, ts FROM room_messages WHERE room = ? ORDER BY id DESC LIMIT ?');
+  // Row shape returned by better-sqlite3 .all(); boundary cast, column names are authoritative
+  interface MsgRow { room: string; sender: string; kind: RoomMessage['kind']; text: string; ts: number }
+
   busGateway = new BusGateway({
     agentId: process.env.BUS_AGENT_ID ?? 'web-gateway',
     registryUrl: REGISTRY_URL,
     userName: process.env.BUS_USER_NAME ?? 'me',
+    store: {
+      insert: (m) => { insertMsg.run(m.room, m.from, m.kind, m.text, m.ts); },
+      load: (room, limit) =>
+        (loadMsg.all(room, limit) as MsgRow[])
+          .reverse()
+          .map((r) => ({ room: r.room, from: r.sender, kind: r.kind, text: r.text, ts: r.ts })),
+    },
   });
   await busGateway.connect((process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean));
   busGateway.onRoomMessage((msg) => {
@@ -117,6 +143,50 @@ if (REGISTRY_URL && harness.server) {
     if (!room || !text) return createError(req.id, -32602, 'Missing room or text');
     return createResponse(req.id, await busGateway!.sendChat(room, text));
   });
+
+  // Task board (Task/Contract + Lease)
+  const taskBoard = new TaskBoard(chatDb, {
+    requestAgent: (target, payload, timeoutMs) => busGateway!.requestAgent(target, payload, timeoutMs),
+    postMessage: (room, text) => busGateway!.postSystemMessage(room, text),
+  });
+  appServer.registerMethod('task/create', (req) => {
+    const room = param(req, 'room');
+    const title = param(req, 'title');
+    const owner = param(req, 'owner') ?? null;
+    const p = req.params as Record<string, unknown> | undefined;
+    const acceptance = Array.isArray(p?.acceptance) ? p.acceptance.filter((a): a is string => typeof a === 'string') : [];
+    if (!room || !title) return createError(req.id, -32602, 'Missing room or title');
+    try {
+      return createResponse(req.id, { task: taskBoard.create(room, title, acceptance, owner, 'human') });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('task/list', (req) => {
+    const room = param(req, 'room');
+    if (!room) return createError(req.id, -32602, 'Missing room');
+    return createResponse(req.id, { tasks: taskBoard.list(room) });
+  });
+  appServer.registerMethod('task/approve', (req) => {
+    const id = param(req, 'taskId');
+    if (!id) return createError(req.id, -32602, 'Missing taskId');
+    try {
+      return createResponse(req.id, { task: taskBoard.approve(id) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('task/return', (req) => {
+    const id = param(req, 'taskId');
+    const note = param(req, 'note') ?? '未说明原因';
+    if (!id) return createError(req.id, -32602, 'Missing taskId');
+    try {
+      return createResponse(req.id, { task: taskBoard.returnTask(id, note) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  console.log(`[server] TaskBoard ready (room_tasks)`);
   console.log(`[server] Bus gateway "${process.env.BUS_AGENT_ID ?? 'web-gateway'}" -> ${REGISTRY_URL}`);
 }
 

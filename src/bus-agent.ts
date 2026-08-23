@@ -87,7 +87,44 @@ async function speak(room: string, text: string): Promise<void> {
   });
 }
 
+/** Handle task assign/rework requests from the TaskBoard; reply with evidence. */
+async function handleTaskRequest(payload: object, reply: (r: unknown) => void): Promise<void> {
+  const taskId = 'taskId' in payload && typeof payload.taskId === 'string' ? payload.taskId : '';
+  const action = 'action' in payload && typeof payload.action === 'string' ? payload.action : 'assign';
+  const title = 'title' in payload && typeof payload.title === 'string' ? payload.title : '';
+  const acceptance =
+    'acceptance' in payload && Array.isArray(payload.acceptance)
+      ? payload.acceptance.filter((a): a is string => typeof a === 'string')
+      : [];
+  const note = 'note' in payload && typeof payload.note === 'string' ? payload.note : '';
+
+  console.log(`[${agentId}] task ${action}: ${title.slice(0, 80)}`);
+  const criteria = acceptance.map((a, i) => `${i + 1}. ${a}`).join('\n');
+  const prompt = `你收到一个任务。
+标题：${title}
+验收标准：
+${criteria}
+${action === 'rework' ? `上一次交付被退回，退回原因：${note}\n请修正后重新交付。` : ''}
+请直接完成任务并给出交付物。你的回复将全文作为验收证据提交，请确保逐条满足验收标准。`;
+
+  try {
+    const answer = model
+      ? stripThink((await model.generate([
+          { role: 'system', content: `You are agent "${agentId}".${persona ? ` 你的专长：${persona}。` : ''} 完成任务并用中文交付。` },
+          { role: 'user', content: prompt },
+        ])).content ?? '')
+      : `${agentId}@${os.hostname()} 无 LLM，无法执行任务`;
+    reply({ kind: 'task', taskId, action: 'submit', agent: agentId, evidence: answer });
+  } catch (err) {
+    reply({ kind: 'task', taskId, action: 'failed', agent: agentId, error: String(err) });
+  }
+}
+
 bus.onRequest(async (payload, reply) => {
+  if (payload && typeof payload === 'object' && 'kind' in payload && payload.kind === 'task') {
+    await handleTaskRequest(payload, reply);
+    return;
+  }
   const text = extractText(payload);
   console.log(`[${agentId}] request: ${text.slice(0, 120)}`);
   try {
@@ -113,13 +150,12 @@ bus.onMessage(async (msg) => {
   }
   const text = 'text' in p && typeof p.text === 'string' ? p.text : '';
   const from = 'from' in p && typeof p.from === 'string' ? p.from : msg.from;
-  const isHuman = 'human' in p && p.human === true;
   const room = msg.channel ?? channel;
   console.log(`[${agentId}] chat from ${from} [${room}]: ${text.slice(0, 80)}`);
 
-  // Only humans' messages trigger judgment; agent chatter never does (loop guard).
-  if (!isHuman) return;
-
+  // Agent messages are judgeable now — the registry's lapping gate bounds
+  // inter-agent exchanges to ~1 message per agent per round, so no loop guard
+  // is needed here. Judge failure stays fail-closed (silence).
   const mentioned = new RegExp(`@${agentId}(?:\\b|$)`).test(text);
   if (!mentioned && !(await shouldInterject(text, from).catch(() => false))) {
     console.log(`[${agentId}] stays silent`);
@@ -127,7 +163,7 @@ bus.onMessage(async (msg) => {
   }
   console.log(`[${agentId}] interjects`);
   const answer = await answerText(text, from).catch((err) => `（回答失败: ${String(err)}）`);
-  await speak(room, answer);
+  await speak(room, answer).catch((err) => console.log(`[${agentId}] speak held/failed: ${String(err).slice(0, 80)}`));
 });
 
 await bus.connect();

@@ -20,6 +20,11 @@ export interface RoomMessage {
   ts: number;
 }
 
+export interface RoomStore {
+  insert(msg: RoomMessage): void;
+  load(room: string, limit: number): RoomMessage[];
+}
+
 export interface BusGatewayConfig {
   agentId: string;
   registryUrl: string;
@@ -29,6 +34,8 @@ export interface BusGatewayConfig {
   userName?: string;
   /** Max messages kept per room for history replay. */
   historySize?: number;
+  /** Optional persistence; without it room history is memory-only. */
+  store?: RoomStore;
 }
 
 export class BusGateway {
@@ -38,6 +45,7 @@ export class BusGateway {
   private registryUrl: string;
   private userName: string;
   private historySize: number;
+  private store?: RoomStore;
   private history = new Map<string, RoomMessage[]>();
   private listeners = new Set<(msg: RoomMessage) => void>();
 
@@ -46,6 +54,7 @@ export class BusGateway {
     this.registryUrl = config.registryUrl;
     this.userName = config.userName ?? 'web-user';
     this.historySize = config.historySize ?? 100;
+    this.store = config.store;
     this.transport = new HttpTransport({ agentId: config.agentId, registryUrl: config.registryUrl });
     this.bus = new AgentBusImpl(config.agentId, this.transport);
 
@@ -68,6 +77,16 @@ export class BusGateway {
     this.listeners.add(listener);
   }
 
+  /** Direct bus request to an agent (used by TaskBoard for assign/rework). */
+  async requestAgent(target: string, payload: unknown, timeoutMs = 90000): Promise<unknown> {
+    return this.bus.request(target, payload, timeoutMs);
+  }
+
+  /** Post a system message into a room (persisted + broadcast to WS clients). */
+  postSystemMessage(room: string, text: string): void {
+    this.emit({ room, from: 'system', kind: 'system', text, ts: Date.now() });
+  }
+
   async listRooms(): Promise<RoomInfo[]> {
     const data = (await this.getJson(`${this.registryUrl}/channels`)) as { channels?: { name: string }[] };
     const rooms: RoomInfo[] = [];
@@ -82,7 +101,12 @@ export class BusGateway {
   }
 
   getHistory(room: string): RoomMessage[] {
-    return this.history.get(room) ?? [];
+    let buf = this.history.get(room);
+    if (!buf && this.store) {
+      buf = this.store.load(room, this.historySize);
+      this.history.set(room, buf);
+    }
+    return buf ?? [];
   }
 
   /**
@@ -155,6 +179,11 @@ export class BusGateway {
     }
     buf.push(msg);
     if (buf.length > this.historySize) buf.shift();
+    try {
+      this.store?.insert(msg);
+    } catch (err) {
+      console.error('[bus-gateway] persist failed:', err);
+    }
     for (const l of this.listeners) l(msg);
   }
 

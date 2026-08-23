@@ -271,6 +271,15 @@ export class HttpTransport implements Transport {
       agentId: this.agentId,
       url: `http://${this.host}:${this.port}`,
     }).catch(() => {});
+    // Self-heal: re-ensure home + extra channels on every heartbeat.
+    // Registry is in-memory; if it restarted, channels vanish and this rebuilds them.
+    await this.postJson(`${this.registryUrl}/channels/create`, {
+      channel: this.channel,
+      agentId: this.agentId,
+    }).catch(() => {});
+    for (const ch of this.extraChannels) {
+      await this.postJson(`${this.registryUrl}/channels/join`, { channel: ch, agentId: this.agentId }).catch(() => {});
+    }
   }
 
   private async pollMessages(): Promise<void> {
@@ -295,16 +304,39 @@ interface QueuedMessage {
   enqueuedAt: number;
 }
 
+interface ChannelState {
+  members: Set<string>;
+  /** Agent broadcast messages since last human attention (lapping counter). */
+  agentMsgs: number;
+  /** Distinct agent speakers since last human attention. */
+  speakers: Set<string>;
+  /** from → last broadcast payload, for verbatim-dup. */
+  lastText: Map<string, string>;
+  /** from → fixed 60s window counter (rate floor, agent traffic only). */
+  rate: Map<string, { start: number; count: number }>;
+}
+
+function newChannelState(): ChannelState {
+  return { members: new Set(), agentMsgs: 0, speakers: new Set(), lastText: new Map(), rate: new Map() };
+}
+
+/** Human chat broadcasts reset loop counters — humans are the resetter, never throttled. */
+function isHumanChat(msg: BusMessage): boolean {
+  const p = msg.payload;
+  return !!(p && typeof p === 'object' && 'human' in p && p.human === true);
+}
+
+const AGENT_BCAST_RATE_PER_MINUTE = 30;
+
 export function createRegistryServer(port = 9876): Server {
   const agents = new Map<string, PeerInfo>();
   const queues = new Map<string, QueuedMessage[]>();
-  // channel name -> member agentIds. 'default' always exists; /register auto-joins it.
-  const channels = new Map<string, Set<string>>([['default', new Set()]]);
+  // channel name -> state. 'default' always exists; /register auto-joins it.
+  const channels = new Map<string, ChannelState>([['default', newChannelState()]]);
   const MAX_QUEUE_SIZE = 1000;
   const MSG_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-  const server = createServer((req, res) => {
-    res.setHeader('Content-Type', 'application/json');
+  const server = createServer((req, res) => {    res.setHeader('Content-Type', 'application/json');
 
     const sendJson = (status: number, data: unknown) => {
       res.writeHead(status);
@@ -317,7 +349,7 @@ export function createRegistryServer(port = 9876): Server {
         try {
           const data = JSON.parse(body) as { agentId: string; url: string };
           agents.set(data.agentId, { agentId: data.agentId, url: data.url, lastSeen: Date.now() });
-          channels.get('default')!.add(data.agentId);
+          channels.get('default')!.members.add(data.agentId);
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -333,7 +365,7 @@ export function createRegistryServer(port = 9876): Server {
           const data = JSON.parse(body) as { agentId: string };
           agents.delete(data.agentId);
           queues.delete(data.agentId);
-          for (const members of channels.values()) members.delete(data.agentId);
+          for (const st of channels.values()) st.members.delete(data.agentId);
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -349,8 +381,8 @@ export function createRegistryServer(port = 9876): Server {
           const data = JSON.parse(body) as { channel: string; agentId: string };
           if (!data.channel) { sendJson(400, { error: 'Missing channel' }); return; }
           const existed = channels.has(data.channel);
-          if (!existed) channels.set(data.channel, new Set());
-          if (data.agentId) channels.get(data.channel)!.add(data.agentId);
+          if (!existed) channels.set(data.channel, newChannelState());
+          if (data.agentId) channels.get(data.channel)!.members.add(data.agentId);
           sendJson(200, { ok: true, created: !existed });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -364,9 +396,9 @@ export function createRegistryServer(port = 9876): Server {
       collectBody(req, (body) => {
         try {
           const data = JSON.parse(body) as { channel: string; agentId: string };
-          const members = channels.get(data.channel);
-          if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
-          members.add(data.agentId);
+          const st = channels.get(data.channel);
+          if (!st) { sendJson(404, { error: 'Channel not found' }); return; }
+          st.members.add(data.agentId);
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -380,8 +412,26 @@ export function createRegistryServer(port = 9876): Server {
       collectBody(req, (body) => {
         try {
           const data = JSON.parse(body) as { channel: string; agentId: string };
-          channels.get(data.channel)?.delete(data.agentId);
+          channels.get(data.channel)?.members.delete(data.agentId);
           sendJson(200, { ok: true });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // POST /channels/delete — Remove a channel entirely (default is protected)
+    if (req.method === 'POST' && req.url === '/channels/delete') {
+      collectBody(req, (body) => {
+        try {
+          const data = JSON.parse(body) as { channel: string };
+          if (!data.channel || data.channel === 'default') {
+            sendJson(400, { error: 'Cannot delete default channel' });
+            return;
+          }
+          const existed = channels.delete(data.channel);
+          sendJson(200, { ok: true, deleted: existed });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
         }
@@ -392,9 +442,9 @@ export function createRegistryServer(port = 9876): Server {
     // GET /channels — List channels with member counts
     if (req.method === 'GET' && req.url === '/channels') {
       sendJson(200, {
-        channels: Array.from(channels.entries()).map(([name, members]) => ({
+        channels: Array.from(channels.entries()).map(([name, st]) => ({
           name,
-          members: members.size,
+          members: st.members.size,
         })),
       });
       return;
@@ -404,9 +454,9 @@ export function createRegistryServer(port = 9876): Server {
     if (req.method === 'GET' && req.url?.startsWith('/channels/members')) {
       const url = new URL(req.url!, `http://localhost`);
       const name = url.searchParams.get('channel') ?? 'default';
-      const members = channels.get(name);
-      if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
-      sendJson(200, { channel: name, members: Array.from(members) });
+      const st = channels.get(name);
+      if (!st) { sendJson(404, { error: 'Channel not found' }); return; }
+      sendJson(200, { channel: name, members: Array.from(st.members) });
       return;
     }
 
@@ -421,10 +471,12 @@ export function createRegistryServer(port = 9876): Server {
             return;
           }
           const channel = msg.channel ?? 'default';
-          const members = channels.get(channel);
-          if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
-          if (!members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
-          if (!members.has(targetId)) { sendJson(403, { error: 'Target not in channel' }); return; }
+          const st = channels.get(channel);
+          if (!st) { sendJson(404, { error: 'Channel not found' }); return; }
+          if (!st.members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
+          if (!st.members.has(targetId)) { sendJson(403, { error: 'Target not in channel' }); return; }
+          // Human-directed traffic resets loop counters (humans are the resetter)
+          if (isHumanChat(msg)) { st.agentMsgs = 0; st.speakers.clear(); }
 
           let queue = queues.get(targetId);
           if (!queue) {
@@ -467,16 +519,46 @@ export function createRegistryServer(port = 9876): Server {
     }
 
     // POST /broadcast — Relay to all members of the message's channel
+    // Gates (agent traffic only; humans reset and are never throttled):
+    //   rate floor 30/min, verbatim-dup, lapping (agentMsgs > distinct speakers → HELD)
     if (req.method === 'POST' && req.url === '/broadcast') {
       collectBody(req, (body) => {
         try {
           const msg = JSON.parse(body) as BusMessage;
           const channel = msg.channel ?? 'default';
-          const members = channels.get(channel);
-          if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
-          if (!members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
+          const st = channels.get(channel);
+          if (!st) { sendJson(404, { error: 'Channel not found' }); return; }
+          if (!st.members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
+
+          if (isHumanChat(msg)) {
+            st.agentMsgs = 0;
+            st.speakers.clear();
+          } else {
+            const now = Date.now();
+            const win = st.rate.get(msg.from);
+            if (!win || now - win.start >= 60000) {
+              st.rate.set(msg.from, { start: now, count: 1 });
+            } else if (++win.count > AGENT_BCAST_RATE_PER_MINUTE) {
+              sendJson(429, { held: true, reason: 'rate' });
+              return;
+            }
+            const text = JSON.stringify(msg.payload);
+            if (st.lastText.get(msg.from) === text) {
+              sendJson(409, { held: true, reason: 'verbatim' });
+              return;
+            }
+            const speakers = new Set(st.speakers).add(msg.from);
+            if (st.agentMsgs + 1 > speakers.size) {
+              sendJson(429, { held: true, reason: 'lapping' });
+              return;
+            }
+            st.agentMsgs++;
+            st.speakers.add(msg.from);
+            st.lastText.set(msg.from, text);
+          }
+
           let count = 0;
-          for (const id of members) {
+          for (const id of st.members) {
             if (id !== msg.from) {
               let queue = queues.get(id);
               if (!queue) {
@@ -516,6 +598,20 @@ export function createRegistryServer(port = 9876): Server {
 
     sendJson(404, { error: 'Not found' });
   });
+
+  // Evict agents that stopped heartbeating (registry has no disconnect guarantee)
+  const STALE_MS = 3 * 60 * 1000;
+  const sweeper = setInterval(() => {
+    const now = Date.now();
+    for (const [id, peer] of agents) {
+      if (now - peer.lastSeen > STALE_MS) {
+        agents.delete(id);
+        queues.delete(id);
+        for (const st of channels.values()) st.members.delete(id);
+      }
+    }
+  }, 60000);
+  sweeper.unref();
 
   server.listen(port, () => {
     console.log(`[AgentBus] Registry server listening on port ${port}`);
