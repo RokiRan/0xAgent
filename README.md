@@ -1,6 +1,6 @@
 # Agent Harness
 
-> 生产级 AI Agent 框架。插件化架构、多模型支持、安全沙箱、持久化会话、向量记忆、并行调度、MCP 协议兼容。
+> 生产级 AI Agent 框架。插件化架构、多模型支持、安全沙箱、持久化会话、向量记忆、并行调度、MCP 协议兼容、跨网络多 Agent 协作（渠道中继 + 协调闸门 + 任务/决策/承诺硬对象）。
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -43,7 +43,12 @@ Agent Harness 是一个受 [DeepSeek Harness](https://github.com/deepseek-ai/awe
 | | 向量记忆 | ✅ | RAG 检索历史上下文 |
 | | 上下文压缩 | ✅ | 阈值触发 + 摘要 |
 | **通信协议** | Agent Bus (内存) | ✅ | 同进程通信 |
-| | Agent Bus (HTTP) | ✅ | P2P / Registry 中继 |
+| | Agent Bus (HTTP) | ✅ | P2P / Registry 中继 / 渠道隔离 |
+| | 协调闸门 | ✅ | lapping / verbatim-dup / 速率地板 / seen-cursor / hold-token |
+| | 多 agent 聊天室 | ✅ | @ 点名、自主插嘴判断、上下文互评 |
+| | 任务板 | ✅ | Task/Lease/评分重派/验收/ADR |
+| | 决策板 | ✅ | quorum/timebox/anti-reopen/结构化升级 |
+| | 承诺与依赖 | ✅ | promise 确认入图、阻塞驱动催办 |
 | | MCP Server | ✅ | 对外暴露工具 |
 | | MCP Client | ✅ | 调用外部 MCP 工具 |
 | | WebSocket | ✅ | 实时双向通信 |
@@ -115,12 +120,16 @@ export AGENT_DB_PATH=./data/threads.db
 # 1. CLI 模式（stdio）
 npm run dev
 
-# 2. Web UI 模式（WebSocket + HTTP）
-npm run dev:v2
+# 2. Web UI 模式（WebSocket + HTTP，无头服务，含多 agent 聊天室）
+AGENT_MODEL_PROVIDER=minimax MINIMAX_API_KEY=sk-... \
+BUS_REGISTRY_URL=http://localhost:9876 npm run server
 # 打开 http://localhost:3456
 
-# 3. MCP Server 模式（stdio，供 Claude Desktop 使用）
-npm run mcp
+# 3. Registry 中继（多 agent 跨网络协作时，放公网节点）
+npm run registry   # 默认 :9876，REGISTRY_PORT 可改
+
+# 4. MCP Server 模式：由 mcp 插件按配置激活（config.server.enabled + transport:'stdio'），
+#    见 src/mcp/plugin.ts；无独立 npm script
 ```
 
 ### 最小代码示例
@@ -312,6 +321,105 @@ const summary = await scheduler.mapReduce(
 
 ---
 
+## 多 Agent 协作（Agent Bus）
+
+跨网络多 agent 协作系统：Registry 中继（公网节点）+ Bus Agent（各地执行体）+ Web Gateway（聊天室桥）。协调机制移植自 cumora 的工程实践：**并发与一致性用代码硬闸，判断与表达用模型**。
+
+### 架构
+
+```
+┌────────────┐   broadcast/relay   ┌──────────────────┐
+│ bus-agent  │ ◄────poll(2s)─────  │  Registry (公网)  │
+│ (树莓派)   │                     │  channels/queues  │
+└────────────┘                     │  协调闸门 + 指标  │
+┌────────────┐                     └──────────────────┘
+│ bus-agent  │ ◄──────────────────────────▲
+│ (Mac/任意) │                            │ register/heartbeat(30s)
+└────────────┘                            │
+┌────────────┐   WS   ┌─────────────────┐ │
+│  Web UI    │ ◄────► │ Harness Server  │─┘
+│ (聊天室)   │        │ (web-gateway)   │
+└────────────┘        └─────────────────┘
+```
+
+### 渠道（Channel）
+
+消息按渠道隔离。`default` 渠道自动加入；`/register` 心跳每 30s 自愈渠道成员资格（registry 重启无需重启 agent）；3 分钟无心跳的成员被清扫。
+
+| 端点 | 说明 |
+|------|------|
+| `POST /channels/create` | 创建（幂等），创建者加入 |
+| `POST /channels/join` `/leave` | 加入/退出 |
+| `POST /channels/delete` | 删除（`default` 受保护） |
+| `GET /channels` `/channels/members?channel=X` | 列表/成员 |
+| `GET /metrics` | 闸门计数（held 按原因、broadcasts、evicted） |
+
+### 协调闸门（Registry 硬机制）
+
+| 闸门 | 行为 | 语义 |
+|------|------|------|
+| **lapping** | 无人类时，agent 消息数 > 不同发言者数 → 429 HELD | 死循环判据自扩展 |
+| **两档地板** | 人类 10 分钟内在场：cap=6（自适应 `max(6, μ+2σ)`）；人类离开：严格 lapping | 人在场的讨论有界放开 |
+| **verbatim-dup** | 同 `(channel, from)` 逐字重复 → 409 HELD | 不可被 override 绕过 |
+| **速率地板** | 30 条/分钟/agent，**人类流量永不节流** | 内容盲成本地板 |
+| **seen-cursor 新鲜度** | 发言前有未读消息 → 409 HELD 并**内联未读**，agent 重算后重试 | 游标独立于读取路径 |
+| **hold-token** | override 令牌绑定已展示 seq、120s TTL、单次消费、过期拒收 | 覆盖=对已展示状态的确认 |
+
+人类消息重置全部循环计数（人类是复位器）。stale agent 3 分钟清扫。
+
+### 聊天室（Web UI）
+
+- 房间 = 渠道；侧边栏创建/切换，成员徽章实时显示
+- **@ 点名**：request/response 强制应答；**不 @**：广播 + 各 agent 自主判断（judge，fail-closed），反附和规则防互吹
+- agent 可见房间最近 10 条消息（context 注入），能真正互评、收敛共识
+- agent 回复带思考链折叠块 + 耗时，Markdown 渲染（DOMPurify 消毒）
+
+### 任务板（Task/Contract + Lease）
+
+```mermaid
+stateDiagram-v2
+  ready --> in_progress: 指派/认领(起租30min)
+  in_progress --> review: agent 提交 evidence
+  in_progress --> in_progress: 评分重派(租约逾期)
+  in_progress --> escalated: 二次逾期(升级给人)
+  review --> done: approver 确认(自动落 ADR)
+  review --> in_progress: 退回(带 note 返工)
+  done --> in_progress: 仅新证据 diff 返工
+  escalated --> cancelled: 人类终止(强制 ADR)
+```
+
+不变量：acceptance 非空才能开工；approver ≠ owner；重派评分 = 在场 − 负载×10 + 历史成功率×10（纯 DB 事实）。高风险任务（`risk: 'high'`）停在 `pending_approval`，人工确认才派发。
+
+### 决策板（Decision）
+
+`decision/open` 发起表决 → 全体在场 agent 收票（LLM 选项+理由）→ quorum 达成即 `decided`；timebox 到点未决 → `escalated`（四行结构化封套：要决定什么/选项与票数/默认项/时限后果）；人类再超时 → 采用默认项（`auto_default`）。`decided` 只有新证据 diff 可 reopen。
+
+### 承诺与依赖（Commitment）
+
+`promise/create` 产生承诺候选，**agent 确认后才入依赖图**；`dep/add` 登记依赖边（防环）。阻塞驱动催办：只点名关键路径上逾期的阻塞者，同一依赖边 45 分钟冷却。
+
+### 部署
+
+```bash
+# Registry（公网节点，单文件零依赖）
+npx esbuild src/registry-server.ts --bundle --platform=node --format=esm --outfile=registry.mjs
+REGISTRY_PORT=9876 node registry.mjs
+
+# Bus Agent（任意机器）
+npx esbuild src/bus-agent.ts --bundle --platform=node --format=esm --outfile=bus-agent.mjs
+AGENT_ID=pi-agent REGISTRY_URL=http://registry:9876 BUS_CHANNEL=team \
+AGENT_PERSONA="树莓派/嵌入式/Linux运维专家" \
+MINIMAX_API_KEY=sk-... node bus-agent.mjs
+
+# Web 服务端（含聊天室 gateway）
+AGENT_MODEL_PROVIDER=minimax MINIMAX_API_KEY=sk-... \
+BUS_REGISTRY_URL=http://registry:9876 BUS_CHANNELS=team npm run server
+```
+
+无 LLM key 的 bus-agent 自动降级为静默模式（不判断、不插嘴、不轻诺）。
+
+---
+
 ## MCP 协议兼容
 
 ### 作为 MCP Server
@@ -357,20 +465,25 @@ const harness = new HarnessV2({
 ### 启动
 
 ```bash
-npm run dev:v2
+npm run server
 # 自动启动:
 # - HTTP 静态服务器: http://localhost:3456
-# - WebSocket JSON-RPC: ws://localhost:3456/jsonrpc
+# - WebSocket JSON-RPC: ws://localhost:3456/jsonrpc（同端口共享）
+# - 设了 BUS_REGISTRY_URL 时: 多 agent 聊天室 gateway
+#
+# （cli-v2 的 npm run dev:v2 是带终端 REPL 的形态，后台/服务部署请用 npm run server）
 ```
 
 ### 功能
 
-- **Thread 管理**：侧边栏列出所有线程，点击切换
-- **实时通信**：WebSocket 双向推送，无需轮询
-- **流式输出**：Agent 思考过程实时展示
+- **Thread 管理**：侧边栏列出所有线程（首条消息派生标题），点击切换
+- **多 Agent 聊天室**：渠道房间、@ 点名补全、成员徽章、任务面板
+- **思考链展示**：`<think>` 推理折叠块 + 耗时统计
+- **Markdown 渲染**：marked + DOMPurify 消毒（表格/代码块/列表）
+- **实时通信**：WebSocket 双向推送，断线 3s 自动重连
 - **审批交互**：危险操作弹窗确认
-- **代码高亮**：消息中的代码块自动格式化
-- **移动端适配**：响应式设计
+- **输入体验**：多行自增高、@ 补全、无选中时禁用引导
+- **响应式**：侧边栏可折叠，窄屏自动收起
 
 ### 截图
 
@@ -430,6 +543,46 @@ npm run dev:v2
 | `memory/search` | `{ query, topK? }` | 搜索历史 |
 | `memory/context` | `{ query, maxTokens? }` | 获取相关上下文 |
 
+**聊天室（需 `BUS_REGISTRY_URL`）**
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `room/list` | - | 房间列表（含成员） |
+| `room/create` | `{ name }` | 创建房间 |
+| `room/history` | `{ room }` | 房间消息历史（SQLite 持久化） |
+| `room/send` | `{ room, text }` | 发言；`@agent` 点名强制应答，否则广播+自主判断 |
+
+**任务板**
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `task/create` | `{ room, title, acceptance[], owner?, risk? }` | 创建；acceptance 必填；`risk:'high'` 需 `task/confirm` |
+| `task/list` | `{ room }` | 任务列表 |
+| `task/approve` / `task/return` | `{ taskId }` / `{ taskId, note }` | 验收（落 ADR）/ 退回返工 |
+| `task/cancel` | `{ taskId, adr }` | 终止（ADR 必填） |
+| `task/reopen` | `{ taskId, evidence }` | done 返工（需新证据 diff） |
+| `task/reassign` / `task/confirm` | `{ taskId, owner }` / `{ taskId }` | 人工重派 / 高风险确认 |
+| `promise/create` | `{ room, taskId, promiser, dueInMin? }` | 承诺候选（agent 确认才入图） |
+| `dep/add` | `{ blockedTaskId, blockingTaskId }` | 依赖边（防环） |
+
+**决策板**
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `decision/open` | `{ room, question, options[], criterion?, quorum?, defaultOption?, timeboxMin? }` | 发起表决 |
+| `decision/list` | `{ room }` | 决策列表 |
+| `decision/resolve` | `{ decisionId, option }` | 人类裁定 |
+| `decision/reopen` | `{ decisionId, evidence }` | 新证据重开 |
+
+**原则与指标**
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `principle/propose` | `{ room, text, taskId? }` | 登记 episode 经验 |
+| `principle/promote` / `principle/pin` | `{ principleId }` | 晋升（需 ≥2 来源）/ 人类 pin |
+| `principle/list` | `{ room }` | 原则列表 |
+| `metrics/get` | - | 任务/决策/gateway/registry 计数汇总 |
+
 ### 通知 (Server → Client)
 
 | 通知 | 说明 |
@@ -441,6 +594,7 @@ npm run dev:v2
 | `tool_call/started` | 工具调用开始 |
 | `tool_call/completed` | 工具调用完成 |
 | `approval/required` | 需要人工审批 |
+| `room/message` | 聊天室新消息（user/agent/system） |
 | `system/connected` | 客户端连接成功 |
 
 ---
@@ -528,8 +682,11 @@ agent-harness/
 │   │   ├── protocol.ts            # JSON-RPC 协议
 │   │   ├── server.ts              # App Server 核心
 │   │   ├── server-v2.ts           # 集成版 (SQLite + Memory)
+│   │   ├── bus-gateway.ts         # 聊天室桥（房间/扇出/@/context 注入）
+│   │   ├── task-board.ts          # 任务板（Task/Lease/重派/催办/承诺/原则）
+│   │   ├── decision-board.ts      # 决策板（quorum/timebox/anti-reopen）
 │   │   ├── stdio-transport.ts     # stdio 传输
-│   │   ├── websocket-transport.ts # WebSocket 传输
+│   │   ├── websocket-transport.ts # WebSocket 传输（可共享静态服务端口）
 │   │   └── static-server.ts       # 静态文件服务
 │   ├── mcp/                       # MCP 协议适配
 │   │   ├── protocol.ts            # MCP 协议实现
@@ -552,18 +709,22 @@ agent-harness/
 │   │   │   ├── memory.ts          # 内存存储
 │   │   │   └── persistence.ts     # JSON 持久化
 │   │   ├── agent-bus/             # 多 Agent 通信
-│   │   │   ├── bus.ts             # 总线实现
-│   │   │   └── http-transport.ts  # HTTP 传输
+│   │   │   ├── bus.ts             # 总线实现（内存/Redis transport）
+│   │   │   └── http-transport.ts  # HTTP 传输 + Registry（渠道/闸门/指标）
 │   │   └── observability/         # 可观测性
 │   │       └── tracer.ts          # 执行追踪
 │   ├── harness.ts                 # 基础组装
 │   ├── harness-pro.ts             # 产品级组装
 │   ├── harness-v2.ts              # V2 组装器
 │   ├── cli.ts                     # CLI 入口
-│   ├── cli-v2.ts                  # V2 CLI 入口
+│   ├── cli-v2.ts                  # V2 CLI 入口（含终端 REPL）
+│   ├── server.ts                  # 无头服务入口（Web UI + 聊天室 gateway）
+│   ├── registry-server.ts         # Registry 独立入口（公网中继）
+│   ├── bus-agent.ts               # 独立 bus agent（LLM 判断/任务/投票/承诺）
 │   └── demo-*.ts                  # 示例脚本
 ├── public/                        # Web UI 前端
-│   └── index.html                 # 单页应用
+│   ├── index.html                 # 单页应用
+│   └── vendor/                    # marked / DOMPurify（本地 UMD，免 CDN）
 ├── dist/                          # 编译输出
 ├── package.json
 ├── tsconfig.json
