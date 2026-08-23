@@ -83,7 +83,7 @@ export const mcpPlugin: Plugin = {
             externalTools.push({
               name: `${clientConfig.name}:${tool.name}`,
               description: `[${clientConfig.name}] ${tool.description ?? tool.name}`,
-              parameters: tool.inputSchema,
+              parameters: tool.inputSchema as Tool['parameters'],
               async execute(args) {
                 const content = await client.callTool(tool.name, args);
                 return content.map(c => c.type === 'text' ? c.text : `[image: ${c.mimeType}]`).join('\n');

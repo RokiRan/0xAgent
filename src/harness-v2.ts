@@ -114,19 +114,7 @@ export class HarnessV2 {
       enableMemory: this.config.enableMemory,
     });
 
-    // 4. Attach transports
-    const transports = this.config.transports ?? ['stdio'];
-    for (const t of transports) {
-      if (t === 'stdio') {
-        this.appServer.attach(new StdioTransport());
-      } else if (t === 'websocket') {
-        const wsPort = this.config.webUI?.port ?? 3001;
-        this.wsTransport = new WebSocketTransport({ port: wsPort });
-        this.appServer.attach(this.wsTransport);
-      }
-    }
-
-    // 5. Web UI static server
+    // 4. Web UI static server (started first so WebSocket can share its HTTP server)
     if (this.config.webUI?.enabled) {
       const uiPort = this.config.webUI.port ?? 3000;
       this.staticServer = new StaticServer({
@@ -135,6 +123,22 @@ export class HarnessV2 {
       });
       await this.staticServer.start();
       console.log(`\n🌐 Web UI: http://${this.config.webUI.host ?? 'localhost'}:${uiPort}`);
+    }
+
+    // 5. Attach transports
+    const transports = this.config.transports ?? ['stdio'];
+    for (const t of transports) {
+      if (t === 'stdio') {
+        this.appServer.attach(new StdioTransport());
+      } else if (t === 'websocket') {
+        const wsPort = this.config.webUI?.port ?? 3001;
+        // Same port as the Web UI → share its HTTP server (frontend expects ws on location.host).
+        const shared = this.staticServer?.server && wsPort === (this.config.webUI?.port ?? 3000)
+          ? this.staticServer.server
+          : undefined;
+        this.wsTransport = new WebSocketTransport({ port: wsPort, server: shared });
+        this.appServer.attach(this.wsTransport);
+      }
     }
 
     if (this.wsTransport) {

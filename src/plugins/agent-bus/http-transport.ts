@@ -5,13 +5,17 @@
 // ============================================================
 
 import { Transport, BusMessage } from './bus.js';
-import { createServer, request as httpRequest, IncomingMessage, ServerResponse } from 'http';
+import { createServer, request as httpRequest, IncomingMessage, ServerResponse, Server } from 'http';
 
 export interface HttpTransportConfig {
   agentId: string;
   port?: number;
   host?: string;
   registryUrl?: string; // Required for cross-network. e.g. 'http://registry.example.com:9876'
+  /** Home channel for outgoing messages. Default 'default'. */
+  channel?: string;
+  /** Extra channels to join on connect. */
+  channels?: string[];
 }
 
 interface PeerInfo {
@@ -32,10 +36,12 @@ export class HttpTransport implements Transport {
   private agentId: string;
   private port: number;
   private host: string;
-  private server?: ReturnType<typeof createServer>;
+  private server?: Server;
   private handler?: (msg: BusMessage) => void;
   private peers = new Map<string, PeerInfo>();
   private registryUrl?: string;
+  private channel: string;
+  private extraChannels: string[];
   private heartbeatInterval?: ReturnType<typeof setInterval>;
   private pollInterval?: ReturnType<typeof setInterval>;
   private useRegistryRelay: boolean;
@@ -45,6 +51,8 @@ export class HttpTransport implements Transport {
     this.port = config.port ?? 0;
     this.host = config.host ?? '127.0.0.1';
     this.registryUrl = config.registryUrl;
+    this.channel = config.channel ?? 'default';
+    this.extraChannels = config.channels ?? [];
     // If registryUrl is set, we use registry relay for cross-network scenarios
     this.useRegistryRelay = !!config.registryUrl;
   }
@@ -56,10 +64,33 @@ export class HttpTransport implements Transport {
     // Register with registry if configured
     if (this.registryUrl) {
       await this.registerWithRegistry();
+      // Ensure home channel exists and join it, plus any extra channels
+      await this.createChannel(this.channel);
+      for (const ch of this.extraChannels) {
+        await this.joinChannel(ch).catch(() => {});
+      }
       this.heartbeatInterval = setInterval(() => this.registerWithRegistry(), 30000);
       // Start polling for relayed messages
       this.pollInterval = setInterval(() => this.pollMessages(), 2000);
     }
+  }
+
+  /** Create a channel on the registry (idempotent) and join it. */
+  async createChannel(channel: string): Promise<void> {
+    if (!this.registryUrl) throw new Error('No registry configured');
+    await this.postJson(`${this.registryUrl}/channels/create`, { channel, agentId: this.agentId });
+  }
+
+  /** Join an existing channel. */
+  async joinChannel(channel: string): Promise<void> {
+    if (!this.registryUrl) throw new Error('No registry configured');
+    await this.postJson(`${this.registryUrl}/channels/join`, { channel, agentId: this.agentId });
+  }
+
+  /** Leave a channel. */
+  async leaveChannel(channel: string): Promise<void> {
+    if (!this.registryUrl) throw new Error('No registry configured');
+    await this.postJson(`${this.registryUrl}/channels/leave`, { channel, agentId: this.agentId });
   }
 
   async disconnect(): Promise<void> {
@@ -76,6 +107,7 @@ export class HttpTransport implements Transport {
   }
 
   async send(msg: BusMessage): Promise<void> {
+    msg.channel ??= this.channel;
     if (msg.to === 'broadcast') {
       // Broadcast: try P2P to known peers + registry relay
       const promises: Promise<void>[] = [];
@@ -263,9 +295,11 @@ interface QueuedMessage {
   enqueuedAt: number;
 }
 
-export function createRegistryServer(port = 9876): ReturnType<typeof createServer> {
+export function createRegistryServer(port = 9876): Server {
   const agents = new Map<string, PeerInfo>();
   const queues = new Map<string, QueuedMessage[]>();
+  // channel name -> member agentIds. 'default' always exists; /register auto-joins it.
+  const channels = new Map<string, Set<string>>([['default', new Set()]]);
   const MAX_QUEUE_SIZE = 1000;
   const MSG_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -283,6 +317,7 @@ export function createRegistryServer(port = 9876): ReturnType<typeof createServe
         try {
           const data = JSON.parse(body) as { agentId: string; url: string };
           agents.set(data.agentId, { agentId: data.agentId, url: data.url, lastSeen: Date.now() });
+          channels.get('default')!.add(data.agentId);
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -298,11 +333,80 @@ export function createRegistryServer(port = 9876): ReturnType<typeof createServe
           const data = JSON.parse(body) as { agentId: string };
           agents.delete(data.agentId);
           queues.delete(data.agentId);
+          for (const members of channels.values()) members.delete(data.agentId);
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
         }
       });
+      return;
+    }
+
+    // POST /channels/create — Create a channel (idempotent); creator joins
+    if (req.method === 'POST' && req.url === '/channels/create') {
+      collectBody(req, (body) => {
+        try {
+          const data = JSON.parse(body) as { channel: string; agentId: string };
+          if (!data.channel) { sendJson(400, { error: 'Missing channel' }); return; }
+          const existed = channels.has(data.channel);
+          if (!existed) channels.set(data.channel, new Set());
+          if (data.agentId) channels.get(data.channel)!.add(data.agentId);
+          sendJson(200, { ok: true, created: !existed });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // POST /channels/join — Join an existing channel
+    if (req.method === 'POST' && req.url === '/channels/join') {
+      collectBody(req, (body) => {
+        try {
+          const data = JSON.parse(body) as { channel: string; agentId: string };
+          const members = channels.get(data.channel);
+          if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
+          members.add(data.agentId);
+          sendJson(200, { ok: true });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // POST /channels/leave
+    if (req.method === 'POST' && req.url === '/channels/leave') {
+      collectBody(req, (body) => {
+        try {
+          const data = JSON.parse(body) as { channel: string; agentId: string };
+          channels.get(data.channel)?.delete(data.agentId);
+          sendJson(200, { ok: true });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // GET /channels — List channels with member counts
+    if (req.method === 'GET' && req.url === '/channels') {
+      sendJson(200, {
+        channels: Array.from(channels.entries()).map(([name, members]) => ({
+          name,
+          members: members.size,
+        })),
+      });
+      return;
+    }
+
+    // GET /channels/members?channel=X — List channel members
+    if (req.method === 'GET' && req.url?.startsWith('/channels/members')) {
+      const url = new URL(req.url!, `http://localhost`);
+      const name = url.searchParams.get('channel') ?? 'default';
+      const members = channels.get(name);
+      if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
+      sendJson(200, { channel: name, members: Array.from(members) });
       return;
     }
 
@@ -316,6 +420,11 @@ export function createRegistryServer(port = 9876): ReturnType<typeof createServe
             sendJson(400, { error: 'Invalid target' });
             return;
           }
+          const channel = msg.channel ?? 'default';
+          const members = channels.get(channel);
+          if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
+          if (!members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
+          if (!members.has(targetId)) { sendJson(403, { error: 'Target not in channel' }); return; }
 
           let queue = queues.get(targetId);
           if (!queue) {
@@ -357,13 +466,17 @@ export function createRegistryServer(port = 9876): ReturnType<typeof createServe
       return;
     }
 
-    // POST /broadcast — Relay to all agents
+    // POST /broadcast — Relay to all members of the message's channel
     if (req.method === 'POST' && req.url === '/broadcast') {
       collectBody(req, (body) => {
         try {
           const msg = JSON.parse(body) as BusMessage;
+          const channel = msg.channel ?? 'default';
+          const members = channels.get(channel);
+          if (!members) { sendJson(404, { error: 'Channel not found' }); return; }
+          if (!members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
           let count = 0;
-          for (const [id, peer] of agents) {
+          for (const id of members) {
             if (id !== msg.from) {
               let queue = queues.get(id);
               if (!queue) {

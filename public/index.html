@@ -121,6 +121,7 @@
     .main {
       display: flex;
       flex-direction: column;
+      min-height: 0;
     }
 
     .chat-header {
@@ -159,6 +160,7 @@
 
     .messages {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 20px;
       display: flex;
@@ -245,6 +247,126 @@
       padding: 0;
     }
 
+    .message-text {
+      word-break: break-word;
+    }
+
+    /* Rendered markdown */
+    .message-text > :first-child { margin-top: 0; }
+    .message-text > :last-child { margin-bottom: 0; }
+    .message-text p { margin: 8px 0; }
+    .message-text h1, .message-text h2, .message-text h3,
+    .message-text h4, .message-text h5, .message-text h6 {
+      margin: 14px 0 8px;
+      line-height: 1.3;
+      color: var(--text);
+    }
+    .message-text h1 { font-size: 20px; }
+    .message-text h2 { font-size: 17px; }
+    .message-text h3 { font-size: 15px; }
+    .message-text h4, .message-text h5, .message-text h6 { font-size: 14px; }
+    .message-text ul, .message-text ol {
+      margin: 8px 0;
+      padding-left: 24px;
+    }
+    .message-text li { margin: 4px 0; }
+    .message-text li > ul, .message-text li > ol { margin: 4px 0; }
+    .message-text blockquote {
+      margin: 8px 0;
+      padding: 4px 12px;
+      border-left: 3px solid var(--border);
+      color: var(--text-secondary);
+    }
+    .message-text a { color: var(--accent); text-decoration: none; }
+    .message-text a:hover { text-decoration: underline; }
+    .message-text hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 12px 0;
+    }
+    .message-text table {
+      border-collapse: collapse;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+    .message-text th, .message-text td {
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+    }
+    .message-text th { background: var(--bg-tertiary); }
+    .message-text pre {
+      background: var(--bg-tertiary);
+      padding: 12px;
+      border-radius: var(--radius);
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+    .message-text pre code {
+      background: none;
+      padding: 0;
+      font-size: 13px;
+    }
+    .message-text code {
+      background: var(--bg-tertiary);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+    }
+
+    /* Think chain (collapsible) */
+    .think-block {
+      margin: 4px 0 10px;
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--warning);
+      border-radius: var(--radius);
+      background: var(--bg-secondary);
+      overflow: hidden;
+    }
+
+    .think-block > summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-secondary);
+      user-select: none;
+      list-style: none;
+      transition: color 0.15s;
+    }
+
+    .think-block > summary::-webkit-details-marker { display: none; }
+
+    .think-block > summary::before {
+      content: '▸';
+      font-size: 10px;
+      transition: transform 0.15s;
+    }
+
+    .think-block[open] > summary::before { transform: rotate(90deg); }
+    .think-block > summary:hover { color: var(--text); }
+
+    .think-duration {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--warning);
+    }
+
+    .think-body {
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
     .tool-call {
       background: var(--bg-tertiary);
       border: 1px solid var(--border);
@@ -286,6 +408,7 @@
       display: flex;
       gap: 12px;
       align-items: flex-end;
+      position: relative;
     }
 
     .input-box textarea {
@@ -383,6 +506,101 @@
 
     .hidden { display: none !important; }
 
+    /* Chat rooms */
+    .room-section {
+      border-top: 1px solid var(--border);
+      padding: 8px 0;
+      max-height: 40%;
+      overflow-y: auto;
+    }
+
+    .room-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .room-add-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border-radius: var(--radius);
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+    }
+
+    .room-add-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+    .room-list { padding: 0 8px; }
+
+    .member-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .member-chips:empty { display: none; }
+
+    .member-chip {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+
+    .member-chip.agent { color: var(--accent); border-color: var(--accent); }
+
+    .message.system .message-body { color: var(--warning); font-style: italic; }
+
+    /* @mention */
+    .mention {
+      color: var(--accent);
+      background: var(--bg-tertiary);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-weight: 500;
+    }
+
+    .mention-popup {
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      margin-bottom: 6px;
+      min-width: 180px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      z-index: 20;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+
+    .mention-item {
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .mention-item:hover, .mention-item.active { background: var(--bg-tertiary); }
+
+    .mention-item::before { content: '🤖'; font-size: 12px; }
+
     /* Typing indicator */
     .typing {
       display: flex;
@@ -419,12 +637,22 @@
       </div>
       <button class="new-thread-btn" onclick="createThread()">+ New Thread</button>
       <div class="thread-list" id="threadList"></div>
+      <div class="room-section" id="roomSection">
+        <div class="room-header">
+          <span>聊天室</span>
+          <button class="room-add-btn" onclick="createRoomPrompt()" title="新建聊天室">+</button>
+        </div>
+        <div class="room-list" id="roomList"></div>
+      </div>
     </aside>
 
     <!-- Main -->
     <main class="main">
       <div class="chat-header">
-        <h2 id="threadTitle">Select a thread</h2>
+        <div class="chat-header-main">
+          <h2 id="threadTitle">Select a thread</h2>
+          <div class="member-chips" id="memberChips"></div>
+        </div>
         <div class="actions">
           <button onclick="forkThread()">Fork</button>
           <button onclick="archiveThread()">Archive</button>
@@ -435,11 +663,13 @@
 
       <div class="input-area">
         <div class="input-box">
+          <div class="mention-popup hidden" id="mentionPopup"></div>
           <textarea
             id="messageInput"
-            placeholder="Type a message... (Shift+Enter for new line)"
+            placeholder="Type a message... (@ 指定 agent, Shift+Enter 换行)"
             rows="1"
             onkeydown="handleKeydown(event)"
+            oninput="updateMentionPopup()"
           ></textarea>
           <button id="sendBtn" onclick="sendMessage()">Send</button>
         </div>
@@ -460,13 +690,19 @@
     </div>
   </div>
 
+  <script src="/vendor/marked.umd.js"></script>
+  <script src="/vendor/purify.min.js"></script>
   <script>
     // ── Config ──
     const WS_URL = `ws://${location.host}/jsonrpc`;
+    marked.setOptions({ gfm: true, breaks: true });
     let ws = null;
     let currentThreadId = null;
+    let currentRoom = null;
+    let roomList = [];
     let pendingApprovalId = null;
     let messageId = 0;
+    let lastActivityAt = null;
     const threads = new Map();
 
     // ── WebSocket ──
@@ -476,6 +712,7 @@
       ws.onopen = () => {
         document.getElementById('connectionStatus').classList.remove('disconnected');
         loadThreads();
+        loadRooms();
       };
 
       ws.onclose = () => {
@@ -515,6 +752,7 @@
       if (msg.method) {
         switch (msg.method) {
           case 'turn/started':
+            lastActivityAt = Date.now();
             showTyping();
             break;
           case 'turn/completed':
@@ -525,6 +763,9 @@
             break;
           case 'item/completed':
             renderItem(msg.params.item);
+            break;
+          case 'room/message':
+            if (msg.params.room === currentRoom) renderRoomMessage(msg.params);
             break;
           case 'tool_call/started':
             renderToolCall(msg.params.toolCall);
@@ -584,6 +825,8 @@
 
     async function selectThread(id) {
       currentThreadId = id;
+      currentRoom = null;
+      document.getElementById('memberChips').innerHTML = '';
       const res = await rpc('thread/get', { id });
       const thread = res.result?.thread;
       if (thread) {
@@ -609,11 +852,164 @@
       }
     }
 
+    // ── Chat rooms (multi-agent via bus registry) ──
+    async function loadRooms() {
+      try {
+        const res = await rpc('room/list');
+        if (res.error) throw new Error(res.error.message);
+        roomList = res.result?.rooms || [];
+        renderRoomList();
+      } catch {
+        // Server has no bus gateway — hide the section
+        document.getElementById('roomSection').style.display = 'none';
+      }
+    }
+
+    function renderRoomList() {
+      const list = document.getElementById('roomList');
+      list.innerHTML = '';
+      for (const room of roomList) {
+        const div = document.createElement('div');
+        div.className = `thread-item ${room.name === currentRoom ? 'active' : ''}`;
+        div.onclick = () => selectRoom(room.name);
+        div.innerHTML = `
+          <span class="icon">#</span>
+          <span class="title">${room.name}</span>
+          <span class="time">${room.members.length}人</span>
+        `;
+        list.appendChild(div);
+      }
+    }
+
+    async function selectRoom(name) {
+      currentRoom = name;
+      currentThreadId = null;
+      document.getElementById('threadTitle').textContent = `# ${name}`;
+      renderThreadList();
+      renderRoomList();
+
+      const room = roomList.find(r => r.name === name);
+      const chips = document.getElementById('memberChips');
+      chips.innerHTML = '';
+      for (const m of room?.members ?? []) {
+        const chip = document.createElement('span');
+        chip.className = `member-chip ${m.includes('gateway') ? '' : 'agent'}`;
+        chip.textContent = m;
+        chips.appendChild(chip);
+      }
+
+      const msgs = document.getElementById('messages');
+      msgs.innerHTML = '';
+      const res = await rpc('room/history', { room: name });
+      for (const m of res.result?.messages ?? []) {
+        renderRoomMessage(m);
+      }
+    }
+
+    async function createRoomPrompt() {
+      const name = prompt('聊天室名称（字母/数字/短横线）:');
+      if (!name || !name.trim()) return;
+      const res = await rpc('room/create', { name: name.trim() });
+      if (res.error) {
+        alert(`创建失败: ${res.error.message}`);
+        return;
+      }
+      await loadRooms();
+      await selectRoom(name.trim());
+    }
+
+    // ── @mention autocomplete ──
+    let mentionMatches = [];
+
+    function currentMentionToken() {
+      const el = document.getElementById('messageInput');
+      const uptoCursor = el.value.slice(0, el.selectionStart);
+      const m = uptoCursor.match(/(?:^|\s)@([\w-]*)$/);
+      return m ? { token: m[1], start: uptoCursor.length - m[1].length } : null;
+    }
+
+    function roomAgents() {
+      const room = roomList.find(r => r.name === currentRoom);
+      return (room?.members ?? []).filter(m => !m.includes('gateway'));
+    }
+
+    function updateMentionPopup() {
+      const popup = document.getElementById('mentionPopup');
+      const close = () => { popup.classList.add('hidden'); mentionMatches = []; };
+      if (!currentRoom) { close(); return; }
+      const tok = currentMentionToken();
+      if (!tok) { close(); return; }
+      mentionMatches = roomAgents().filter(a => a !== tok.token && a.toLowerCase().includes(tok.token.toLowerCase()));
+      if (mentionMatches.length === 0) { close(); return; }
+      popup.innerHTML = '';
+      for (const a of mentionMatches) {
+        const item = document.createElement('div');
+        item.className = 'mention-item';
+        item.textContent = a;
+        item.onmousedown = (e) => { e.preventDefault(); completeMention(a); };
+        popup.appendChild(item);
+      }
+      popup.classList.remove('hidden');
+    }
+
+    function completeMention(name) {
+      const el = document.getElementById('messageInput');
+      const tok = currentMentionToken();
+      if (!tok) return;
+      el.value = el.value.slice(0, tok.start) + name + ' ' + el.value.slice(el.selectionStart);
+      el.selectionStart = el.selectionEnd = tok.start + name.length + 1;
+      el.focus();
+      updateMentionPopup();
+    }
+
+    function appendTextWithMentions(body, text) {
+      const re = /@([\w-]+)/g;
+      let last = 0;
+      for (const m of text.matchAll(re)) {
+        body.appendChild(document.createTextNode(text.slice(last, m.index)));
+        const span = document.createElement('span');
+        span.className = 'mention';
+        span.textContent = m[0];
+        body.appendChild(span);
+        last = m.index + m[0].length;
+      }
+      body.appendChild(document.createTextNode(text.slice(last)));
+    }
+
+    function renderRoomMessage(m) {
+      const msgs = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = `message ${m.kind === 'user' ? 'user' : m.kind === 'system' ? 'system' : 'assistant'}`;
+
+      const avatar = document.createElement('div');
+      avatar.className = 'message-avatar';
+      avatar.textContent = m.from.slice(0, 1).toUpperCase();
+
+      const content = document.createElement('div');
+      content.className = 'message-content';
+      const time = new Date(m.ts).toLocaleTimeString();
+      content.innerHTML = `<div class="message-header"><span class="name">${m.from}</span> <span class="time" style="margin-left:8px;font-size:11px;color:var(--text-secondary)">${time}</span></div>`;
+
+      const body = document.createElement('div');
+      body.className = 'message-body';
+      if (m.kind === 'agent') {
+        renderMessageContent(body, { role: 'assistant', content: m.text, createdAt: m.ts });
+      } else {
+        appendTextWithMentions(body, m.text);
+      }
+
+      content.appendChild(body);
+      div.appendChild(avatar);
+      div.appendChild(content);
+      msgs.appendChild(div);
+      msgs.scrollTop = msgs.scrollHeight;
+    }
     function renderThread(thread) {
       document.getElementById('threadTitle').textContent = thread.id;
       const msgs = document.getElementById('messages');
       msgs.innerHTML = '';
       for (const turn of thread.turns) {
+        lastActivityAt = turn.startedAt ?? null;
         for (const item of turn.items) {
           renderItem(item);
         }
@@ -643,7 +1039,7 @@
 
       const body = document.createElement('div');
       body.className = 'message-body';
-      body.textContent = item.content || '';
+      renderMessageContent(body, item);
 
       content.appendChild(header);
       content.appendChild(body);
@@ -651,6 +1047,66 @@
       div.appendChild(content);
       msgs.appendChild(div);
       msgs.scrollTop = msgs.scrollHeight;
+      lastActivityAt = item.createdAt ?? Date.now();
+    }
+
+    function renderMessageContent(body, item) {
+      const text = item.content || '';
+      if (item.role !== 'assistant') {
+        body.textContent = text;
+        return;
+      }
+      const appendMarkdown = (md) => {
+        const div = document.createElement('div');
+        div.className = 'message-text';
+        div.innerHTML = DOMPurify.sanitize(marked.parse(md));
+        body.appendChild(div);
+      };
+      if (!text.includes('<think>')) {
+        appendMarkdown(text);
+        return;
+      }
+      const parts = text.split(/<think>([\s\S]*?)<\/think>/);
+      for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 1) {
+          if (parts[i].trim()) body.appendChild(buildThinkBlock(parts[i], item));
+        } else {
+          const seg = parts[i].replace(/<\/?think>/g, '').trim();
+          if (seg) appendMarkdown(seg);
+        }
+      }
+    }
+
+    function buildThinkBlock(thinkText, item) {
+      const details = document.createElement('details');
+      details.className = 'think-block';
+
+      const summary = document.createElement('summary');
+      const label = document.createElement('span');
+      label.textContent = '🧠 思考过程';
+      summary.appendChild(label);
+
+      const duration = computeThinkDuration(item);
+      if (duration) {
+        const dur = document.createElement('span');
+        dur.className = 'think-duration';
+        dur.textContent = `耗时 ${duration}`;
+        summary.appendChild(dur);
+      }
+
+      const thinkBody = document.createElement('div');
+      thinkBody.className = 'think-body';
+      thinkBody.textContent = thinkText.trim();
+
+      details.appendChild(summary);
+      details.appendChild(thinkBody);
+      return details;
+    }
+
+    function computeThinkDuration(item) {
+      if (!lastActivityAt || !item.createdAt || item.createdAt <= lastActivityAt) return null;
+      const ms = item.createdAt - lastActivityAt;
+      return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
     }
 
     function renderToolCall(toolCall) {
@@ -717,6 +1173,22 @@
 
     // ── Input ──
     function handleKeydown(e) {
+      // IME composition (e.g. Chinese input): Enter confirms the candidate,
+      // must not complete mention or send the message.
+      if (e.isComposing || e.keyCode === 229) return;
+      // Mention popup steals Enter/Tab/Escape while open
+      if (mentionMatches.length > 0) {
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          completeMention(mentionMatches[0]);
+          return;
+        }
+        if (e.key === 'Escape') {
+          mentionMatches = [];
+          document.getElementById('mentionPopup').classList.add('hidden');
+          return;
+        }
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
@@ -726,7 +1198,20 @@
     async function sendMessage() {
       const input = document.getElementById('messageInput');
       const text = input.value.trim();
-      if (!text || !currentThreadId) return;
+      if (!text) return;
+
+      // Chat-room mode: gateway echoes our message back via room/message
+      if (currentRoom) {
+        input.value = '';
+        input.style.height = 'auto';
+        mentionMatches = [];
+        document.getElementById('mentionPopup').classList.add('hidden');
+        const res = await rpc('room/send', { room: currentRoom, text });
+        if (res.error) alert(`发送失败: ${res.error.message}`);
+        return;
+      }
+
+      if (!currentThreadId) return;
 
       input.value = '';
       input.style.height = 'auto';

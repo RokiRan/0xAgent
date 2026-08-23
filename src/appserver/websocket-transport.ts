@@ -9,13 +9,15 @@ import {
   createResponse, createError,
 } from './protocol.js';
 import { WebSocketServer, WebSocket } from 'ws';
-import { IncomingMessage } from 'http';
+import { IncomingMessage, Server as HttpServer } from 'http';
 
 export interface WebSocketTransportConfig {
   port: number;
   host?: string;
   path?: string;
   heartbeatIntervalMs?: number;
+  /** Attach to an existing HTTP server instead of binding a new port. */
+  server?: HttpServer;
 }
 
 export class WebSocketTransport implements AppServerTransport {
@@ -25,11 +27,13 @@ export class WebSocketTransport implements AppServerTransport {
   private heartbeatTimer?: NodeJS.Timeout;
 
   constructor(private config: WebSocketTransportConfig) {
-    this.wss = new WebSocketServer({
-      port: config.port,
-      host: config.host ?? '0.0.0.0',
-      path: config.path ?? '/jsonrpc',
-    });
+    this.wss = config.server
+      ? new WebSocketServer({ server: config.server, path: config.path ?? '/jsonrpc' })
+      : new WebSocketServer({
+          port: config.port,
+          host: config.host ?? '0.0.0.0',
+          path: config.path ?? '/jsonrpc',
+        });
 
     this.wss.on('connection', (ws, req) => {
       const clientId = this.extractClientId(req);

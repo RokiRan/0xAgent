@@ -17,7 +17,7 @@ export interface StaticServerConfig {
 }
 
 export class StaticServer {
-  private server?: http.Server;
+  server?: http.Server;
 
   constructor(private config: StaticServerConfig) {}
 

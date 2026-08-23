@@ -13,6 +13,8 @@ export interface BusMessage {
   payload: unknown;
   correlationId?: string;
   timestamp: number;
+  /** Registry relay channel. Absent = 'default'. */
+  channel?: string;
 }
 
 export interface Transport {

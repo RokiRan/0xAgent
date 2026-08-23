@@ -32,12 +32,20 @@ export interface AppServerV2Config {
   enableMemory?: boolean;
 }
 
+export type RpcHandler = (req: JsonRpcRequest) => Promise<JsonRpcResponse> | JsonRpcResponse;
+
 export class AppServerV2 {
   private threads: ThreadManager;
   private transports = new Set<AppServerTransport>();
   private runningTurns = new Map<string, AbortController>();
   private memory?: ThreadMemory;
   private sqliteManager?: SQLiteThreadManager;
+  private customMethods = new Map<string, RpcHandler>();
+
+  /** Register an additional JSON-RPC method (e.g. bus chat-room methods). */
+  registerMethod(name: string, handler: RpcHandler): void {
+    this.customMethods.set(name, handler);
+  }
 
   constructor(private config: AppServerV2Config) {
     if (config.persistence) {
@@ -105,8 +113,11 @@ export class AppServerV2 {
           return this.handleMemoryContext(req);
         case 'ping':
           return createResponse(req.id, { pong: true, timestamp: Date.now() });
-        default:
+        default: {
+          const custom = this.customMethods.get(req.method);
+          if (custom) return await custom(req);
           return createError(req.id, -32601, `Method not found: ${req.method}`);
+        }
       }
     } catch (err) {
       return createError(req.id, -32603, String(err));

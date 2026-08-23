@@ -14,6 +14,8 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "dev:v2": "tsx src/cli-v2.ts",
+    "server": "tsx src/server.ts",
+    "registry": "tsx src/registry-server.ts",
     "start": "node dist/cli.js",
     "start:v2": "node dist/cli-v2.js",
     "test": "node dist/test-pro.js",
@@ -52,7 +54,9 @@
     "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
     "canvas": "^3.2.3",
+    "dompurify": "^3.4.14",
     "jsdom": "^30.0.1",
+    "marked": "^18.0.10",
     "playwright": "^1.62.1",
     "tsx": "^4.0.0",
     "typescript": "^5.4.0"
