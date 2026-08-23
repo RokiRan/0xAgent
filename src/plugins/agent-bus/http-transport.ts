@@ -61,14 +61,9 @@ export class HttpTransport implements Transport {
     // Start local HTTP server (for P2P + receiving direct messages)
     await this.startServer();
 
-    // Register with registry if configured
+    // Register with registry if configured (also ensures home + extra channels, self-healing)
     if (this.registryUrl) {
       await this.registerWithRegistry();
-      // Ensure home channel exists and join it, plus any extra channels
-      await this.createChannel(this.channel);
-      for (const ch of this.extraChannels) {
-        await this.joinChannel(ch).catch(() => {});
-      }
       this.heartbeatInterval = setInterval(() => this.registerWithRegistry(), 30000);
       // Start polling for relayed messages
       this.pollInterval = setInterval(() => this.pollMessages(), 2000);
@@ -228,7 +223,9 @@ export class HttpTransport implements Transport {
           if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
             resolve();
           } else {
-            reject(new Error(`HTTP ${res.statusCode}`));
+            let errBody = '';
+            res.on('data', (chunk) => { errBody += chunk; });
+            res.on('end', () => reject(new Error(`HTTP ${res.statusCode}: ${errBody.slice(0, 2000)}`)));
           }
         }
       );
@@ -306,10 +303,18 @@ interface QueuedMessage {
 
 interface ChannelState {
   members: Set<string>;
+  /** Monotonic broadcast sequence per channel. */
+  seq: number;
+  /** Recent broadcast log for HELD inline-unseen (bounded 50). */
+  log: { seq: number; from: string; text: string }[];
   /** Agent broadcast messages since last human attention (lapping counter). */
   agentMsgs: number;
   /** Distinct agent speakers since last human attention. */
   speakers: Set<string>;
+  /** Last human message timestamp — human presence relaxes the loop floor. */
+  lastHumanAt: number;
+  /** Completed-round message counts, for adaptive cap μ+2σ (bounded 100). */
+  rounds: number[];
   /** from → last broadcast payload, for verbatim-dup. */
   lastText: Map<string, string>;
   /** from → fixed 60s window counter (rate floor, agent traffic only). */
@@ -317,7 +322,7 @@ interface ChannelState {
 }
 
 function newChannelState(): ChannelState {
-  return { members: new Set(), agentMsgs: 0, speakers: new Set(), lastText: new Map(), rate: new Map() };
+  return { members: new Set(), seq: 0, log: [], agentMsgs: 0, speakers: new Set(), lastHumanAt: 0, rounds: [], lastText: new Map(), rate: new Map() };
 }
 
 /** Human chat broadcasts reset loop counters — humans are the resetter, never throttled. */
@@ -328,6 +333,12 @@ function isHumanChat(msg: BusMessage): boolean {
 
 const AGENT_BCAST_RATE_PER_MINUTE = 30;
 
+function payloadText(msg: BusMessage): string {
+  const p = msg.payload;
+  if (p && typeof p === 'object' && 'text' in p && typeof p.text === 'string') return p.text.slice(0, 500);
+  return JSON.stringify(p)?.slice(0, 500) ?? '';
+}
+
 export function createRegistryServer(port = 9876): Server {
   const agents = new Map<string, PeerInfo>();
   const queues = new Map<string, QueuedMessage[]>();
@@ -335,6 +346,23 @@ export function createRegistryServer(port = 9876): Server {
   const channels = new Map<string, ChannelState>([['default', newChannelState()]]);
   const MAX_QUEUE_SIZE = 1000;
   const MSG_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  // Gate observability (cumora §7.3): what fires, how often
+  const metrics = {
+    broadcasts: 0,
+    relays: 0,
+    evicted: 0,
+    held: {} as Record<string, number>,
+  };
+  const countHeld = (reason: string) => {
+    metrics.held[reason] = (metrics.held[reason] ?? 0) + 1;
+  };
+
+  // seen-cursor: highest channel seq DELIVERED to an agent via /poll (server-side fact).
+  // Deliberately separate from any read/inbox cursor (cumora §2.2.1).
+  const seen = new Map<string, number>(); // key: `${agentId}|${channel}`
+  // hold-token: override = confirming already-shown state; single-use, 120s TTL.
+  const holds = new Map<string, { token: string; seq: number; expires: number }>(); // key: `${agentId}|${channel}`
 
   const server = createServer((req, res) => {    res.setHeader('Content-Type', 'application/json');
 
@@ -476,7 +504,7 @@ export function createRegistryServer(port = 9876): Server {
           if (!st.members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
           if (!st.members.has(targetId)) { sendJson(403, { error: 'Target not in channel' }); return; }
           // Human-directed traffic resets loop counters (humans are the resetter)
-          if (isHumanChat(msg)) { st.agentMsgs = 0; st.speakers.clear(); }
+          if (isHumanChat(msg)) { st.agentMsgs = 0; st.speakers.clear(); st.lastHumanAt = Date.now(); }
 
           let queue = queues.get(targetId);
           if (!queue) {
@@ -487,6 +515,7 @@ export function createRegistryServer(port = 9876): Server {
           if (queue.length > MAX_QUEUE_SIZE) {
             queue.shift(); // Drop oldest
           }
+          metrics.relays++;
           sendJson(200, { queued: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -510,6 +539,14 @@ export function createRegistryServer(port = 9876): Server {
       const valid = queue.filter(q => now - q.enqueuedAt < MSG_TTL_MS).map(q => q.msg);
       queues.set(agentId, []); // Clear after poll
 
+      // Advance seen cursors to the max delivered seq per channel
+      for (const m of valid) {
+        if (m.channel && typeof m.seq === 'number') {
+          const key = `${agentId}|${m.channel}`;
+          if ((seen.get(key) ?? 0) < m.seq) seen.set(key, m.seq);
+        }
+      }
+
       // Update lastSeen
       const agent = agents.get(agentId);
       if (agent) agent.lastSeen = now;
@@ -531,25 +568,64 @@ export function createRegistryServer(port = 9876): Server {
           if (!st.members.has(msg.from)) { sendJson(403, { error: 'Sender not in channel' }); return; }
 
           if (isHumanChat(msg)) {
+            // Record the completed round for the adaptive cap, then reset
+            if (st.agentMsgs > 0) {
+              st.rounds.push(st.agentMsgs);
+              if (st.rounds.length > 100) st.rounds.shift();
+            }
             st.agentMsgs = 0;
             st.speakers.clear();
+            st.lastHumanAt = Date.now();
           } else {
             const now = Date.now();
             const win = st.rate.get(msg.from);
             if (!win || now - win.start >= 60000) {
               st.rate.set(msg.from, { start: now, count: 1 });
             } else if (++win.count > AGENT_BCAST_RATE_PER_MINUTE) {
+              countHeld('rate');
               sendJson(429, { held: true, reason: 'rate' });
               return;
             }
             const text = JSON.stringify(msg.payload);
             if (st.lastText.get(msg.from) === text) {
+              countHeld('verbatim');
               sendJson(409, { held: true, reason: 'verbatim' });
               return;
             }
+            // Freshness precheck: unseen channel messages → HELD with inline unseen + hold-token.
+            // Override (holdToken) is single-use and only valid while the shown seq is still latest.
+            const key = `${msg.from}|${channel}`;
+            const held0 = msg.holdToken ? holds.get(key) : undefined;
+            const overrideOk =
+              !!held0 && held0.token === msg.holdToken && held0.expires > Date.now() && held0.seq === st.seq;
+            if (msg.holdToken) holds.delete(key); // consume on any presentation
+            if (!overrideOk && (seen.get(key) ?? 0) < st.seq) {
+              countHeld('freshness');
+              const cursor = seen.get(key) ?? 0;
+              const unseen = st.log.filter((e) => e.seq > cursor && e.from !== msg.from);
+              seen.set(key, st.seq); // HELD advances baseline — no HELD self-loop
+              const newToken = Math.random().toString(36).slice(2) + Date.now().toString(36);
+              holds.set(key, { token: newToken, seq: st.seq, expires: Date.now() + 120000 });
+              sendJson(409, { held: true, reason: 'freshness', unseen, token: newToken });
+              return;
+            }
+            // Two-tier loop floor (cumora §6.7): human present → adaptive high cap
+            // max(20, μ+2σ) over completed rounds; human absent → strict lapping.
             const speakers = new Set(st.speakers).add(msg.from);
-            if (st.agentMsgs + 1 > speakers.size) {
-              sendJson(429, { held: true, reason: 'lapping' });
+            const humanPresent = now - st.lastHumanAt < 10 * 60 * 1000;
+            let cap = speakers.size;
+            if (humanPresent) {
+              if (st.rounds.length >= 3) {
+                const mean = st.rounds.reduce((a, b) => a + b, 0) / st.rounds.length;
+                const variance = st.rounds.reduce((a, b) => a + (b - mean) ** 2, 0) / st.rounds.length;
+                cap = Math.max(20, Math.ceil(mean + 2 * Math.sqrt(variance)));
+              } else {
+                cap = 20;
+              }
+            }
+            if (st.agentMsgs + 1 > cap) {
+              countHeld(humanPresent ? 'hard_cap' : 'lapping');
+              sendJson(429, { held: true, reason: humanPresent ? 'hard_cap' : 'lapping' });
               return;
             }
             st.agentMsgs++;
@@ -558,6 +634,10 @@ export function createRegistryServer(port = 9876): Server {
           }
 
           let count = 0;
+          st.seq++;
+          msg.seq = st.seq;
+          st.log.push({ seq: st.seq, from: msg.from, text: payloadText(msg) });
+          if (st.log.length > 50) st.log.shift();
           for (const id of st.members) {
             if (id !== msg.from) {
               let queue = queues.get(id);
@@ -569,11 +649,18 @@ export function createRegistryServer(port = 9876): Server {
               count++;
             }
           }
+          metrics.broadcasts++;
           sendJson(200, { queued: count });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
         }
       });
+      return;
+    }
+
+    // GET /metrics — gate counters (no message content, counts only)
+    if (req.method === 'GET' && req.url === '/metrics') {
+      sendJson(200, metrics);
       return;
     }
 
@@ -608,6 +695,7 @@ export function createRegistryServer(port = 9876): Server {
         agents.delete(id);
         queues.delete(id);
         for (const st of channels.values()) st.members.delete(id);
+        metrics.evicted++;
       }
     }
   }, 60000);

@@ -12,6 +12,7 @@ import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import { BusGateway, RoomMessage } from './appserver/bus-gateway.js';
 import { TaskBoard } from './appserver/task-board.js';
+import { DecisionBoard } from './appserver/decision-board.js';
 import { createResponse, createError, createNotification, JsonRpcRequest } from './appserver/protocol.js';
 
 function loadEnvConfig(): Partial<HarnessV2Config> {
@@ -106,6 +107,7 @@ if (REGISTRY_URL && harness.server) {
     agentId: process.env.BUS_AGENT_ID ?? 'web-gateway',
     registryUrl: REGISTRY_URL,
     userName: process.env.BUS_USER_NAME ?? 'me',
+    channels: (process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean),
     store: {
       insert: (m) => { insertMsg.run(m.room, m.from, m.kind, m.text, m.ts); },
       load: (room, limit) =>
@@ -114,7 +116,7 @@ if (REGISTRY_URL && harness.server) {
           .map((r) => ({ room: r.room, from: r.sender, kind: r.kind, text: r.text, ts: r.ts })),
     },
   });
-  await busGateway.connect((process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean));
+  await busGateway.connect();
   busGateway.onRoomMessage((msg) => {
     appServer.broadcast(createNotification('room/message', msg));
   });
@@ -148,6 +150,7 @@ if (REGISTRY_URL && harness.server) {
   const taskBoard = new TaskBoard(chatDb, {
     requestAgent: (target, payload, timeoutMs) => busGateway!.requestAgent(target, payload, timeoutMs),
     postMessage: (room, text) => busGateway!.postSystemMessage(room, text),
+    listMembers: (room) => busGateway!.listMembers(room),
   });
   appServer.registerMethod('task/create', (req) => {
     const room = param(req, 'room');
@@ -156,8 +159,9 @@ if (REGISTRY_URL && harness.server) {
     const p = req.params as Record<string, unknown> | undefined;
     const acceptance = Array.isArray(p?.acceptance) ? p.acceptance.filter((a): a is string => typeof a === 'string') : [];
     if (!room || !title) return createError(req.id, -32602, 'Missing room or title');
+    const risk = param(req, 'risk') === 'high' ? 'high' as const : 'low' as const;
     try {
-      return createResponse(req.id, { task: taskBoard.create(room, title, acceptance, owner, 'human') });
+      return createResponse(req.id, { task: taskBoard.create(room, title, acceptance, owner, 'human', risk) });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
@@ -186,7 +190,170 @@ if (REGISTRY_URL && harness.server) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
   });
+  appServer.registerMethod('task/cancel', (req) => {
+    const id = param(req, 'taskId');
+    const adr = param(req, 'adr') ?? '';
+    if (!id) return createError(req.id, -32602, 'Missing taskId');
+    try {
+      return createResponse(req.id, { task: taskBoard.cancel(id, adr) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('task/reopen', (req) => {
+    const id = param(req, 'taskId');
+    const evidence = param(req, 'evidence') ?? '';
+    if (!id) return createError(req.id, -32602, 'Missing taskId');
+    try {
+      return createResponse(req.id, { task: taskBoard.reopen(id, evidence) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('task/reassign', (req) => {
+    const id = param(req, 'taskId');
+    const owner = param(req, 'owner');
+    if (!id || !owner) return createError(req.id, -32602, 'Missing taskId or owner');
+    try {
+      return createResponse(req.id, { task: taskBoard.reassign(id, owner) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('task/confirm', (req) => {
+    const id = param(req, 'taskId');
+    if (!id) return createError(req.id, -32602, 'Missing taskId');
+    try {
+      return createResponse(req.id, { task: taskBoard.confirm(id) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('promise/create', async (req) => {
+    const room = param(req, 'room');
+    const taskId = param(req, 'taskId');
+    const promiser = param(req, 'promiser');
+    const p = req.params as Record<string, unknown> | undefined;
+    const dueInMin = typeof p?.dueInMin === 'number' ? p.dueInMin : 60;
+    if (!room || !taskId || !promiser) return createError(req.id, -32602, 'Missing room, taskId or promiser');
+    try {
+      await taskBoard.createPromise(room, taskId, promiser, Date.now() + dueInMin * 60000);
+      return createResponse(req.id, { ok: true });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('dep/add', (req) => {
+    const blocked = param(req, 'blockedTaskId');
+    const blocking = param(req, 'blockingTaskId');
+    if (!blocked || !blocking) return createError(req.id, -32602, 'Missing blockedTaskId or blockingTaskId');
+    try {
+      taskBoard.addDep(blocked, blocking);
+      return createResponse(req.id, { ok: true });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
   console.log(`[server] TaskBoard ready (room_tasks)`);
+
+  // Decision board (quorum + timebox + anti-reopen)
+  const decisionBoard = new DecisionBoard(chatDb, {
+    requestAgent: (target, payload, timeoutMs) => busGateway!.requestAgent(target, payload, timeoutMs),
+    postMessage: (room, text) => busGateway!.postSystemMessage(room, text),
+    listMembers: (room) => busGateway!.listMembers(room),
+  });
+  appServer.registerMethod('decision/open', async (req) => {
+    const room = param(req, 'room');
+    const question = param(req, 'question');
+    const p = req.params as Record<string, unknown> | undefined;
+    const options = Array.isArray(p?.options) ? p.options.filter((o): o is string => typeof o === 'string') : [];
+    const criterion = param(req, 'criterion') ?? '';
+    const defaultOption = param(req, 'defaultOption') ?? options[0] ?? '';
+    const quorum = typeof p?.quorum === 'number' ? p.quorum : 2;
+    const timeboxMin = typeof p?.timeboxMin === 'number' ? p.timeboxMin : 5;
+    if (!room || !question) return createError(req.id, -32602, 'Missing room or question');
+    try {
+      return createResponse(req.id, { decision: await decisionBoard.open(room, question, options, criterion, quorum, defaultOption, timeboxMin * 60000) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('decision/list', (req) => {
+    const room = param(req, 'room');
+    if (!room) return createError(req.id, -32602, 'Missing room');
+    return createResponse(req.id, { decisions: decisionBoard.list(room) });
+  });
+  appServer.registerMethod('decision/resolve', (req) => {
+    const id = param(req, 'decisionId');
+    const option = param(req, 'option');
+    if (!id || !option) return createError(req.id, -32602, 'Missing decisionId or option');
+    try {
+      return createResponse(req.id, { decision: decisionBoard.resolve(id, option) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('decision/reopen', (req) => {
+    const id = param(req, 'decisionId');
+    const evidence = param(req, 'evidence') ?? '';
+    if (!id) return createError(req.id, -32602, 'Missing decisionId');
+    try {
+      return createResponse(req.id, { decision: decisionBoard.reopen(id, evidence) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+
+  appServer.registerMethod('principle/propose', (req) => {
+    const room = param(req, 'room');
+    const text = param(req, 'text');
+    const taskId = param(req, 'taskId') ?? 'manual';
+    if (!room || !text) return createError(req.id, -32602, 'Missing room or text');
+    taskBoard.proposePrinciple(room, text, taskId);
+    return createResponse(req.id, { ok: true });
+  });
+  appServer.registerMethod('principle/promote', (req) => {
+    const id = param(req, 'principleId');
+    if (!id) return createError(req.id, -32602, 'Missing principleId');
+    try {
+      taskBoard.promotePrinciple(id, false);
+      return createResponse(req.id, { ok: true });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('principle/pin', (req) => {
+    const id = param(req, 'principleId');
+    if (!id) return createError(req.id, -32602, 'Missing principleId');
+    try {
+      taskBoard.promotePrinciple(id, true);
+      return createResponse(req.id, { ok: true });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('principle/list', (req) => {
+    const room = param(req, 'room');
+    if (!room) return createError(req.id, -32602, 'Missing room');
+    return createResponse(req.id, { principles: taskBoard.listPrinciples(room) });
+  });
+
+  // Metrics: local board counters + remote registry gate counters
+  appServer.registerMethod('metrics/get', async (req) => {
+    let registry: unknown;
+    try {
+      const res = await fetch(`${REGISTRY_URL}/metrics`);
+      registry = await res.json();
+    } catch {
+      registry = { error: 'registry unreachable' };
+    }
+    return createResponse(req.id, {
+      tasks: taskBoard.metrics,
+      decisions: decisionBoard.metrics,
+      gateway: busGateway!.health,
+      registry,
+    });
+  });
   console.log(`[server] Bus gateway "${process.env.BUS_AGENT_ID ?? 'web-gateway'}" -> ${REGISTRY_URL}`);
 }
 

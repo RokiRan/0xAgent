@@ -46,6 +46,9 @@ export class BusGateway {
   private userName: string;
   private historySize: number;
   private store?: RoomStore;
+  /** 存储降级：连续 3 次写失败 → degraded（聊天 fail-open，标记可观测）。 */
+  private storeFailures = 0;
+  private degraded = false;
   private history = new Map<string, RoomMessage[]>();
   private listeners = new Set<(msg: RoomMessage) => void>();
 
@@ -55,18 +58,20 @@ export class BusGateway {
     this.userName = config.userName ?? 'web-user';
     this.historySize = config.historySize ?? 100;
     this.store = config.store;
-    this.transport = new HttpTransport({ agentId: config.agentId, registryUrl: config.registryUrl });
+    this.transport = new HttpTransport({
+      agentId: config.agentId,
+      registryUrl: config.registryUrl,
+      // extraChannels are re-joined on every heartbeat → membership survives registry restarts
+      channels: config.channels ?? [],
+    });
     this.bus = new AgentBusImpl(config.agentId, this.transport);
 
     // Agents may broadcast chat events into the room; surface them as messages.
     this.bus.onMessage((msg) => this.onBusEvent(msg));
   }
 
-  async connect(channels: string[] = []): Promise<void> {
+  async connect(): Promise<void> {
     await this.bus.connect();
-    for (const ch of channels) {
-      await this.transport.createChannel(ch);
-    }
   }
 
   async disconnect(): Promise<void> {
@@ -80,6 +85,10 @@ export class BusGateway {
   /** Direct bus request to an agent (used by TaskBoard for assign/rework). */
   async requestAgent(target: string, payload: unknown, timeoutMs = 90000): Promise<unknown> {
     return this.bus.request(target, payload, timeoutMs);
+  }
+
+  get health(): { degraded: boolean; storeFailures: number } {
+    return { degraded: this.degraded, storeFailures: this.storeFailures };
   }
 
   /** Post a system message into a room (persisted + broadcast to WS clients). */
@@ -123,13 +132,18 @@ export class BusGateway {
 
     this.emit({ room, from: this.userName, kind: 'user', text, ts: Date.now() });
 
+    // Recent room context so agents see each other's messages (讨论的基础)
+    const context = this.getHistory(room)
+      .slice(-10)
+      .map((m) => `${m.from}: ${m.text.slice(0, 500)}`);
+
     if (mentions.length === 0) {
       await this.transport.send({
         id: `${this.agentId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
         type: 'event',
         from: this.agentId,
         to: 'broadcast',
-        payload: { kind: 'chat', room, from: this.userName, human: true, text },
+        payload: { kind: 'chat', room, from: this.userName, human: true, text, context },
         channel: room,
         timestamp: Date.now(),
       });
@@ -139,7 +153,7 @@ export class BusGateway {
     const targets = candidates.filter((m) => mentions.includes(m));
     for (const target of targets) {
       this.bus
-        .request(target, { kind: 'chat', room, from: this.userName, text }, 90000)
+        .request(target, { kind: 'chat', room, from: this.userName, human: true, text, context }, 90000)
         .then((res) => {
           this.emit({
             room,
@@ -181,13 +195,23 @@ export class BusGateway {
     if (buf.length > this.historySize) buf.shift();
     try {
       this.store?.insert(msg);
+      if (this.storeFailures > 0) this.storeFailures = 0;
+      if (this.degraded) {
+        this.degraded = false;
+        console.log('[bus-gateway] store recovered, leaving degraded mode');
+      }
     } catch (err) {
+      this.storeFailures++;
+      if (!this.degraded && this.storeFailures >= 3) {
+        this.degraded = true;
+        console.error('[bus-gateway] DEGRADED: room store failing, history is memory-only');
+      }
       console.error('[bus-gateway] persist failed:', err);
     }
     for (const l of this.listeners) l(msg);
   }
 
-  private async listMembers(channel: string): Promise<string[]> {
+  async listMembers(channel: string): Promise<string[]> {
     const data = (await this.getJson(`${this.registryUrl}/channels/members?channel=${encodeURIComponent(channel)}`)) as {
       members?: string[];
     };

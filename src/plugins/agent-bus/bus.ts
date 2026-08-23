@@ -15,6 +15,10 @@ export interface BusMessage {
   timestamp: number;
   /** Registry relay channel. Absent = 'default'. */
   channel?: string;
+  /** Broadcast seq assigned by the registry on accept. */
+  seq?: number;
+  /** Override token from a freshness HELD; single-use, bound to shown seq. */
+  holdToken?: string;
 }
 
 export interface Transport {
