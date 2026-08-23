@@ -812,22 +812,7 @@ const myTool: Tool = {
 
 ## 实际案例
 
-### 案例 1：生成俄罗斯方块
-
-Agent 独立完成完整游戏开发：
-
-1. 分析需求（7 种方块、旋转、消行、计分）
-2. 生成 `index.html`、`styles.css`、`game.js`
-3. 自检查语法和逻辑
-4. 修复边界 case
-
-**产出**：27KB 完整游戏，可直接浏览器运行。
-
-```bash
-python3 -m http.server 3456 --directory tetris-game
-```
-
-### 案例 2：多 Agent 协作写文档
+### 案例 1：多 Agent 协作写文档
 
 ```typescript
 const scheduler = new ParallelScheduler({
