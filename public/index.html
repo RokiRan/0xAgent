@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Harness - Web Console</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-secondary: #8b949e;
+      --accent: #58a6ff;
+      --accent-hover: #79c0ff;
+      --success: #3fb950;
+      --warning: #d29922;
+      --danger: #f85149;
+      --radius: 6px;
+      --font-mono: 'SF Mono', Monaco, monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      height: 100vh;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sidebar-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .sidebar-header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sidebar-header .status {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      animation: pulse 2s infinite;
+    }
+
+    .sidebar-header .status.disconnected {
+      background: var(--danger);
+      animation: none;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .new-thread-btn {
+      margin: 12px 16px;
+      padding: 8px 12px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .new-thread-btn:hover { background: var(--accent-hover); }
+
+    .thread-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 8px;
+    }
+
+    .thread-item {
+      padding: 10px 12px;
+      margin-bottom: 4px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.15s;
+    }
+
+    .thread-item:hover { background: var(--bg-tertiary); }
+    .thread-item.active { background: var(--bg-tertiary); border-left: 2px solid var(--accent); }
+    .thread-item .icon { font-size: 12px; opacity: 0.6; }
+    .thread-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .thread-item .time { font-size: 11px; color: var(--text-secondary); }
+
+    /* Main */
+    .main {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chat-header {
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .chat-header h2 {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    .chat-header .actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .chat-header button {
+      padding: 4px 10px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border-radius: var(--radius);
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .chat-header button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .message {
+      display: flex;
+      gap: 12px;
+      animation: fadeIn 0.2s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .message-avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .message.user .message-avatar { background: var(--accent); color: #fff; }
+    .message.assistant .message-avatar { background: var(--bg-tertiary); color: var(--success); }
+    .message.system .message-avatar { background: var(--warning); color: #000; }
+    .message.tool .message-avatar { background: var(--bg-tertiary); color: var(--text-secondary); }
+
+    .message-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .message-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .message-header .name {
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .message-header .time {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .message-body {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .message-body code {
+      background: var(--bg-tertiary);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+
+    .message-body pre {
+      background: var(--bg-tertiary);
+      padding: 12px;
+      border-radius: var(--radius);
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+
+    .message-body pre code {
+      background: none;
+      padding: 0;
+    }
+
+    .tool-call {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      margin-top: 8px;
+    }
+
+    .tool-call-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+
+    .tool-call-header .tool-name {
+      color: var(--accent);
+      font-weight: 500;
+    }
+
+    .tool-call-args {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: var(--bg);
+      padding: 8px;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+
+    /* Input */
+    .input-area {
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+    }
+
+    .input-box {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+    }
+
+    .input-box textarea {
+      flex: 1;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      color: var(--text);
+      font-size: 14px;
+      resize: none;
+      outline: none;
+      min-height: 44px;
+      max-height: 200px;
+      font-family: var(--font-sans);
+    }
+
+    .input-box textarea:focus {
+      border-color: var(--accent);
+    }
+
+    .input-box button {
+      padding: 10px 16px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .input-box button:hover { background: var(--accent-hover); }
+    .input-box button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Approval Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .modal {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 480px;
+      width: 90%;
+    }
+
+    .modal h3 {
+      font-size: 16px;
+      margin-bottom: 12px;
+    }
+
+    .modal p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+    }
+
+    .modal .tool-info {
+      background: var(--bg-tertiary);
+      padding: 12px;
+      border-radius: var(--radius);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      margin-bottom: 16px;
+      overflow-x: auto;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+    }
+
+    .modal-actions button {
+      padding: 8px 16px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      border: none;
+    }
+
+    .modal-actions .btn-approve { background: var(--success); color: #fff; }
+    .modal-actions .btn-reject { background: var(--danger); color: #fff; }
+
+    .hidden { display: none !important; }
+
+    /* Typing indicator */
+    .typing {
+      display: flex;
+      gap: 4px;
+      padding: 8px 0;
+    }
+
+    .typing-dot {
+      width: 6px;
+      height: 6px;
+      background: var(--text-secondary);
+      border-radius: 50%;
+      animation: typing 1.4s infinite;
+    }
+
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes typing {
+      0%, 60%, 100% { transform: translateY(0); }
+      30% { transform: translateY(-4px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h1>
+          <span class="status" id="connectionStatus"></span>
+          Agent Harness
+        </h1>
+      </div>
+      <button class="new-thread-btn" onclick="createThread()">+ New Thread</button>
+      <div class="thread-list" id="threadList"></div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <div class="chat-header">
+        <h2 id="threadTitle">Select a thread</h2>
+        <div class="actions">
+          <button onclick="forkThread()">Fork</button>
+          <button onclick="archiveThread()">Archive</button>
+        </div>
+      </div>
+
+      <div class="messages" id="messages"></div>
+
+      <div class="input-area">
+        <div class="input-box">
+          <textarea
+            id="messageInput"
+            placeholder="Type a message... (Shift+Enter for new line)"
+            rows="1"
+            onkeydown="handleKeydown(event)"
+          ></textarea>
+          <button id="sendBtn" onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Approval Modal -->
+  <div class="modal-overlay hidden" id="approvalModal">
+    <div class="modal">
+      <h3>Approval Required</h3>
+      <p>The agent wants to execute a tool:</p>
+      <div class="tool-info" id="approvalToolInfo"></div>
+      <div class="modal-actions">
+        <button class="btn-reject" onclick="resolveApproval(false)">Reject</button>
+        <button class="btn-approve" onclick="resolveApproval(true)">Approve</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── Config ──
+    const WS_URL = `ws://${location.host}/jsonrpc`;
+    let ws = null;
+    let currentThreadId = null;
+    let pendingApprovalId = null;
+    let messageId = 0;
+    const threads = new Map();
+
+    // ── WebSocket ──
+    function connect() {
+      ws = new WebSocket(WS_URL);
+
+      ws.onopen = () => {
+        document.getElementById('connectionStatus').classList.remove('disconnected');
+        loadThreads();
+      };
+
+      ws.onclose = () => {
+        document.getElementById('connectionStatus').classList.add('disconnected');
+        setTimeout(connect, 3000);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleMessage(msg);
+      };
+    }
+
+    // ── JSON-RPC helpers ──
+    function rpc(method, params = {}) {
+      const id = ++messageId;
+      return new Promise((resolve) => {
+        const handler = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.id === id) {
+            ws.removeEventListener('message', handler);
+            resolve(msg);
+          }
+        };
+        ws.addEventListener('message', handler);
+        ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+      });
+    }
+
+    function notify(method, params = {}) {
+      ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }));
+    }
+
+    // ── Message handling ──
+    function handleMessage(msg) {
+      // Notifications
+      if (msg.method) {
+        switch (msg.method) {
+          case 'turn/started':
+            showTyping();
+            break;
+          case 'turn/completed':
+            hideTyping();
+            break;
+          case 'item/delta':
+            appendDelta(msg.params);
+            break;
+          case 'item/completed':
+            renderItem(msg.params.item);
+            break;
+          case 'tool_call/started':
+            renderToolCall(msg.params.toolCall);
+            break;
+          case 'tool_call/completed':
+            updateToolResult(msg.params);
+            break;
+          case 'approval/required':
+            showApproval(msg.params);
+            break;
+          case 'system/connected':
+            console.log('Connected:', msg.params.clientId);
+            break;
+        }
+        return;
+      }
+    }
+
+    // ── Thread management ──
+    async function loadThreads() {
+      const res = await rpc('thread/list');
+      const list = res.result?.threads || [];
+      list.forEach(t => threads.set(t.id, t));
+      renderThreadList();
+    }
+
+    async function createThread() {
+      const res = await rpc('thread/create');
+      const thread = res.result?.thread;
+      if (thread) {
+        threads.set(thread.id, thread);
+        selectThread(thread.id);
+        renderThreadList();
+      }
+    }
+
+    async function forkThread() {
+      if (!currentThreadId) return;
+      const res = await rpc('thread/fork', { sourceId: currentThreadId });
+      const thread = res.result?.thread;
+      if (thread) {
+        threads.set(thread.id, thread);
+        selectThread(thread.id);
+        renderThreadList();
+      }
+    }
+
+    async function archiveThread() {
+      if (!currentThreadId) return;
+      await rpc('thread/archive', { id: currentThreadId });
+      threads.delete(currentThreadId);
+      currentThreadId = null;
+      document.getElementById('messages').innerHTML = '';
+      document.getElementById('threadTitle').textContent = 'Select a thread';
+      renderThreadList();
+    }
+
+    async function selectThread(id) {
+      currentThreadId = id;
+      const res = await rpc('thread/get', { id });
+      const thread = res.result?.thread;
+      if (thread) {
+        renderThread(thread);
+        renderThreadList();
+      }
+    }
+
+    function renderThreadList() {
+      const list = document.getElementById('threadList');
+      list.innerHTML = '';
+      for (const [id, thread] of threads) {
+        const div = document.createElement('div');
+        div.className = `thread-item ${id === currentThreadId ? 'active' : ''}`;
+        div.onclick = () => selectThread(id);
+        const date = new Date(thread.updatedAt).toLocaleDateString();
+        div.innerHTML = `
+          <span class="icon">💬</span>
+          <span class="title">${id.slice(0, 20)}</span>
+          <span class="time">${date}</span>
+        `;
+        list.appendChild(div);
+      }
+    }
+
+    function renderThread(thread) {
+      document.getElementById('threadTitle').textContent = thread.id;
+      const msgs = document.getElementById('messages');
+      msgs.innerHTML = '';
+      for (const turn of thread.turns) {
+        for (const item of turn.items) {
+          renderItem(item);
+        }
+      }
+    }
+
+    // ── Message rendering ──
+    function renderItem(item) {
+      const msgs = document.getElementById('messages');
+      const existing = document.getElementById(`item-${item.id}`);
+      if (existing) existing.remove();
+
+      const div = document.createElement('div');
+      div.id = `item-${item.id}`;
+      div.className = `message ${item.role || 'system'}`;
+
+      const avatar = document.createElement('div');
+      avatar.className = 'message-avatar';
+      avatar.textContent = getAvatar(item);
+
+      const content = document.createElement('div');
+      content.className = 'message-content';
+
+      const header = document.createElement('div');
+      header.className = 'message-header';
+      header.innerHTML = `<span class="name">${item.role || 'system'}</span>`;
+
+      const body = document.createElement('div');
+      body.className = 'message-body';
+      body.textContent = item.content || '';
+
+      content.appendChild(header);
+      content.appendChild(body);
+      div.appendChild(avatar);
+      div.appendChild(content);
+      msgs.appendChild(div);
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+
+    function renderToolCall(toolCall) {
+      const msgs = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = 'message tool';
+      div.innerHTML = `
+        <div class="message-avatar">🔧</div>
+        <div class="message-content">
+          <div class="tool-call">
+            <div class="tool-call-header">
+              <span>Tool:</span>
+              <span class="tool-name">${toolCall.name}</span>
+            </div>
+            <div class="tool-call-args">${JSON.stringify(toolCall.arguments, null, 2)}</div>
+          </div>
+        </div>
+      `;
+      msgs.appendChild(div);
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+
+    function updateToolResult(params) {
+      // Could update the tool call with result
+    }
+
+    function appendDelta(params) {
+      // Stream incremental updates
+    }
+
+    function showTyping() {
+      const msgs = document.getElementById('messages');
+      if (document.getElementById('typing-indicator')) return;
+      const div = document.createElement('div');
+      div.id = 'typing-indicator';
+      div.className = 'message assistant';
+      div.innerHTML = `
+        <div class="message-avatar">🤖</div>
+        <div class="message-content">
+          <div class="typing">
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+          </div>
+        </div>
+      `;
+      msgs.appendChild(div);
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+
+    function hideTyping() {
+      const el = document.getElementById('typing-indicator');
+      if (el) el.remove();
+    }
+
+    function getAvatar(item) {
+      switch (item.role) {
+        case 'user': return 'U';
+        case 'assistant': return 'A';
+        case 'developer': return 'D';
+        default: return 'S';
+      }
+    }
+
+    // ── Input ──
+    function handleKeydown(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    }
+
+    async function sendMessage() {
+      const input = document.getElementById('messageInput');
+      const text = input.value.trim();
+      if (!text || !currentThreadId) return;
+
+      input.value = '';
+      input.style.height = 'auto';
+
+      // Render user message immediately
+      renderItem({
+        id: `user-${Date.now()}`,
+        type: 'message',
+        role: 'user',
+        content: text,
+        status: 'completed',
+        createdAt: Date.now(),
+      });
+
+      document.getElementById('sendBtn').disabled = true;
+
+      try {
+        await rpc('turn/submit', { threadId: currentThreadId, input: text });
+      } catch (err) {
+        console.error('Failed to submit:', err);
+      } finally {
+        document.getElementById('sendBtn').disabled = false;
+      }
+    }
+
+    // ── Approval ──
+    function showApproval(params) {
+      pendingApprovalId = params.id;
+      document.getElementById('approvalToolInfo').textContent =
+        `${params.toolName}\n${JSON.stringify(params.arguments, null, 2)}`;
+      document.getElementById('approvalModal').classList.remove('hidden');
+    }
+
+    async function resolveApproval(approved) {
+      if (!pendingApprovalId) return;
+      await rpc('approval/resolve', { id: pendingApprovalId, approved });
+      pendingApprovalId = null;
+      document.getElementById('approvalModal').classList.add('hidden');
+    }
+
+    // ── Init ──
+    connect();
+  </script>
+</body>
+</html>

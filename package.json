@@ -1,0 +1,60 @@
+{
+  "name": "agent-harness",
+  "version": "0.1.0",
+  "description": "Lightweight, plugin-based AI Agent framework for Node.js. Everything is a plugin.",
+  "type": "module",
+  "main": "dist/harness.js",
+  "types": "dist/harness.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "dev:v2": "tsx src/cli-v2.ts",
+    "start": "node dist/cli.js",
+    "start:v2": "node dist/cli-v2.js",
+    "test": "node dist/test-pro.js",
+    "demo:multi-agent": "node dist/demo-multi-agent.js",
+    "demo:http": "node dist/test-http-transport.js"
+  },
+  "keywords": [
+    "agent",
+    "ai",
+    "llm",
+    "openai",
+    "minimax",
+    "plugin",
+    "framework",
+    "typescript",
+    "react",
+    "tool-calling",
+    "multi-agent"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "ws": "^8.21.3",
+    "yaml": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.18.1",
+    "canvas": "^3.2.3",
+    "jsdom": "^30.0.1",
+    "playwright": "^1.62.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  }
+}

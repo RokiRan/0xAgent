@@ -1,0 +1,418 @@
+// ============================================================
+// Plugin: HTTP Transport for Agent Bus (Geo-Distributed)
+// Supports both P2P (same network) and Registry relay (cross-network).
+// No external dependencies. Pure Node.js http module.
+// ============================================================
+
+import { Transport, BusMessage } from './bus.js';
+import { createServer, request as httpRequest, IncomingMessage, ServerResponse } from 'http';
+
+export interface HttpTransportConfig {
+  agentId: string;
+  port?: number;
+  host?: string;
+  registryUrl?: string; // Required for cross-network. e.g. 'http://registry.example.com:9876'
+}
+
+interface PeerInfo {
+  agentId: string;
+  url: string;
+  lastSeen: number;
+}
+
+/**
+ * HttpTransport supports two modes:
+ * 1. P2P mode: Agent listens on HTTP port, other agents POST directly.
+ *    Works only when agents are in the same network (LAN, same machine, or both have public IPs).
+ * 2. Registry relay mode: All messages go through a central Registry.
+ *    Works across networks (agents behind NAT, different regions).
+ *    Agents only need outbound access to the Registry.
+ */
+export class HttpTransport implements Transport {
+  private agentId: string;
+  private port: number;
+  private host: string;
+  private server?: ReturnType<typeof createServer>;
+  private handler?: (msg: BusMessage) => void;
+  private peers = new Map<string, PeerInfo>();
+  private registryUrl?: string;
+  private heartbeatInterval?: ReturnType<typeof setInterval>;
+  private pollInterval?: ReturnType<typeof setInterval>;
+  private useRegistryRelay: boolean;
+
+  constructor(config: HttpTransportConfig) {
+    this.agentId = config.agentId;
+    this.port = config.port ?? 0;
+    this.host = config.host ?? '127.0.0.1';
+    this.registryUrl = config.registryUrl;
+    // If registryUrl is set, we use registry relay for cross-network scenarios
+    this.useRegistryRelay = !!config.registryUrl;
+  }
+
+  async connect(_agentId?: string): Promise<void> {
+    // Start local HTTP server (for P2P + receiving direct messages)
+    await this.startServer();
+
+    // Register with registry if configured
+    if (this.registryUrl) {
+      await this.registerWithRegistry();
+      this.heartbeatInterval = setInterval(() => this.registerWithRegistry(), 30000);
+      // Start polling for relayed messages
+      this.pollInterval = setInterval(() => this.pollMessages(), 2000);
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    if (this.pollInterval) clearInterval(this.pollInterval);
+
+    if (this.registryUrl) {
+      await this.postJson(`${this.registryUrl}/unregister`, { agentId: this.agentId }).catch(() => {});
+    }
+
+    return new Promise((resolve) => {
+      this.server?.close(() => resolve());
+    });
+  }
+
+  async send(msg: BusMessage): Promise<void> {
+    if (msg.to === 'broadcast') {
+      // Broadcast: try P2P to known peers + registry relay
+      const promises: Promise<void>[] = [];
+      for (const peer of this.peers.values()) {
+        if (peer.agentId !== msg.from) {
+          promises.push(this.tryDeliver(peer.url, msg));
+        }
+      }
+      if (this.registryUrl) {
+        promises.push(this.postJson(`${this.registryUrl}/broadcast`, msg));
+      }
+      await Promise.allSettled(promises);
+    } else {
+      // Direct send: try P2P first, fallback to registry relay
+      const peer = this.peers.get(msg.to);
+      if (peer) {
+        try {
+          await this.deliverToPeer(peer.url, msg);
+          return;
+        } catch {
+          // P2P failed, fallback to registry
+        }
+      }
+
+      if (this.registryUrl) {
+        await this.postJson(`${this.registryUrl}/relay`, msg);
+      } else {
+        throw new Error(`Agent "${msg.to}" not found and no registry configured`);
+      }
+    }
+  }
+
+  onMessage(handler: (msg: BusMessage) => void): void {
+    this.handler = handler;
+  }
+
+  registerPeer(agentId: string, url: string): void {
+    this.peers.set(agentId, { agentId, url, lastSeen: Date.now() });
+  }
+
+  getPeers(): PeerInfo[] {
+    return Array.from(this.peers.values());
+  }
+
+  // ─── Private ───────────────────────────────────────────────
+
+  private startServer(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
+        this.handleRequest(req, res);
+      });
+
+      this.server.listen(this.port, this.host, () => {
+        const addr = this.server!.address();
+        if (addr && typeof addr === 'object') {
+          this.port = addr.port;
+        }
+        console.log(`[AgentBus] HTTP transport listening on http://${this.host}:${this.port}`);
+        resolve();
+      });
+
+      this.server.on('error', reject);
+    });
+  }
+
+  private handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    res.setHeader('Content-Type', 'application/json');
+
+    if (req.method === 'POST' && req.url === '/bus') {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const msg = JSON.parse(body) as BusMessage;
+          res.writeHead(200);
+          res.end(JSON.stringify({ received: true }));
+          this.handler?.(msg);
+        } catch {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'Bad request' }));
+        }
+      });
+    } else {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'Not found' }));
+    }
+  }
+
+  private async tryDeliver(url: string, msg: BusMessage): Promise<void> {
+    try {
+      await this.deliverToPeer(url, msg);
+    } catch {
+      // Ignore P2P failures
+    }
+  }
+
+  private async deliverToPeer(url: string, msg: BusMessage): Promise<void> {
+    await this.postJson(`${url}/bus`, msg);
+  }
+
+  private async postJson(url: string, data: unknown): Promise<void> {
+    const body = JSON.stringify(data);
+    const parsedUrl = new URL(url);
+
+    return new Promise((resolve, reject) => {
+      const req = httpRequest(
+        {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve();
+          } else {
+            reject(new Error(`HTTP ${res.statusCode}`));
+          }
+        }
+      );
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  }
+
+  private async getJson(url: string): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const parsedUrl = new URL(url);
+      const req = httpRequest(
+        {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: 'GET',
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch {
+              resolve(body);
+            }
+          });
+        }
+      );
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  private async registerWithRegistry(): Promise<void> {
+    if (!this.registryUrl) return;
+    await this.postJson(`${this.registryUrl}/register`, {
+      agentId: this.agentId,
+      url: `http://${this.host}:${this.port}`,
+    }).catch(() => {});
+  }
+
+  private async pollMessages(): Promise<void> {
+    if (!this.registryUrl) return;
+    try {
+      const data = await this.getJson(`${this.registryUrl}/poll?agentId=${this.agentId}`) as { messages: BusMessage[] };
+      if (data.messages) {
+        for (const msg of data.messages) {
+          this.handler?.(msg);
+        }
+      }
+    } catch {
+      // Poll failed, retry next interval
+    }
+  }
+}
+
+// ─── Registry Server (runs on a machine with public IP) ─────
+
+interface QueuedMessage {
+  msg: BusMessage;
+  enqueuedAt: number;
+}
+
+export function createRegistryServer(port = 9876): ReturnType<typeof createServer> {
+  const agents = new Map<string, PeerInfo>();
+  const queues = new Map<string, QueuedMessage[]>();
+  const MAX_QUEUE_SIZE = 1000;
+  const MSG_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+
+    const sendJson = (status: number, data: unknown) => {
+      res.writeHead(status);
+      res.end(JSON.stringify(data));
+    };
+
+    // POST /register — Agent heartbeat + registration
+    if (req.method === 'POST' && req.url === '/register') {
+      collectBody(req, (body) => {
+        try {
+          const data = JSON.parse(body) as { agentId: string; url: string };
+          agents.set(data.agentId, { agentId: data.agentId, url: data.url, lastSeen: Date.now() });
+          sendJson(200, { ok: true });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // POST /unregister
+    if (req.method === 'POST' && req.url === '/unregister') {
+      collectBody(req, (body) => {
+        try {
+          const data = JSON.parse(body) as { agentId: string };
+          agents.delete(data.agentId);
+          queues.delete(data.agentId);
+          sendJson(200, { ok: true });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // POST /relay — Store message for target agent
+    if (req.method === 'POST' && req.url === '/relay') {
+      collectBody(req, (body) => {
+        try {
+          const msg = JSON.parse(body) as BusMessage;
+          const targetId = msg.to;
+          if (!targetId || targetId === 'broadcast') {
+            sendJson(400, { error: 'Invalid target' });
+            return;
+          }
+
+          let queue = queues.get(targetId);
+          if (!queue) {
+            queue = [];
+            queues.set(targetId, queue);
+          }
+          queue.push({ msg, enqueuedAt: Date.now() });
+          if (queue.length > MAX_QUEUE_SIZE) {
+            queue.shift(); // Drop oldest
+          }
+          sendJson(200, { queued: true });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // GET /poll — Agent pulls its messages
+    if (req.method === 'GET' && req.url?.startsWith('/poll')) {
+      const url = new URL(req.url!, `http://localhost`);
+      const agentId = url.searchParams.get('agentId');
+      if (!agentId) {
+        sendJson(400, { error: 'Missing agentId' });
+        return;
+      }
+
+      const queue = queues.get(agentId) ?? [];
+      const now = Date.now();
+      // Filter expired messages, return valid ones, clear queue
+      const valid = queue.filter(q => now - q.enqueuedAt < MSG_TTL_MS).map(q => q.msg);
+      queues.set(agentId, []); // Clear after poll
+
+      // Update lastSeen
+      const agent = agents.get(agentId);
+      if (agent) agent.lastSeen = now;
+
+      sendJson(200, { messages: valid });
+      return;
+    }
+
+    // POST /broadcast — Relay to all agents
+    if (req.method === 'POST' && req.url === '/broadcast') {
+      collectBody(req, (body) => {
+        try {
+          const msg = JSON.parse(body) as BusMessage;
+          let count = 0;
+          for (const [id, peer] of agents) {
+            if (id !== msg.from) {
+              let queue = queues.get(id);
+              if (!queue) {
+                queue = [];
+                queues.set(id, queue);
+              }
+              queue.push({ msg, enqueuedAt: Date.now() });
+              count++;
+            }
+          }
+          sendJson(200, { queued: count });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // GET /resolve — Lookup agent URL (for P2P optimization)
+    if (req.method === 'GET' && req.url?.startsWith('/resolve')) {
+      const url = new URL(req.url!, `http://localhost`);
+      const agentId = url.searchParams.get('agentId');
+      const peer = agentId ? agents.get(agentId) : undefined;
+      if (peer) {
+        sendJson(200, { url: peer.url });
+      } else {
+        sendJson(404, { error: 'Agent not found' });
+      }
+      return;
+    }
+
+    // GET /agents — List all registered agents
+    if (req.method === 'GET' && req.url === '/agents') {
+      sendJson(200, { agents: Array.from(agents.values()) });
+      return;
+    }
+
+    sendJson(404, { error: 'Not found' });
+  });
+
+  server.listen(port, () => {
+    console.log(`[AgentBus] Registry server listening on port ${port}`);
+  });
+
+  return server;
+}
+
+function collectBody(req: IncomingMessage, callback: (body: string) => void): void {
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => callback(body));
+}
