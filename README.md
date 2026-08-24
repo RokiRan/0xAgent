@@ -800,24 +800,41 @@ const myTool: Tool = {
 - [x] 工具调用（文件系统、Shell、代码执行）
 - [x] 安全沙箱（进程 + Docker）
 - [x] 会话持久化（SQLite）
-- [x] 向量记忆（RAG）
+- [x] 向量记忆（RAG，按 thread 隔离）
 - [x] 任务规划
-- [x] 多 Agent 通信（内存 / P2P / 跨网络）
+- [x] 多 Agent 通信（内存 / P2P / 跨网络渠道中继）
 - [x] 可观测性（执行追踪）
 - [x] Codex-inspired 架构（V2）
-- [x] Web UI 控制台
+- [x] Web UI 控制台（Markdown / 思考链折叠 / 任务面板）
 - [x] MCP 协议适配
 - [x] 子 Agent 并行调度
+- [x] 协调闸门（lapping / verbatim-dup / 速率地板 / seen-cursor / hold-token / 人类复位）
+- [x] 多 agent 聊天室（@ 点名、自主插嘴、token 预算上下文）
+- [x] 任务板（Task/Lease/评分重派/验收/ADR/风险门）
+- [x] 决策板（quorum/timebox/anti-reopen/结构化升级）
+- [x] 承诺账本与依赖图（确认入图、阻塞驱动催办）
+- [x] 记忆分层（episode→semantic 晋升门）与原则回流 agent 上下文
+- [x] Focus window（深度工作期打断经济学）
+- [x] Registry 状态落盘（在途消息重启不丢）
+- [x] Retention GC（消息/终态对象限期清理）
 
 ### 计划中 📋
 
-- [ ] REST API 服务（HTTP 轮询）
+近期（正确性补洞）：
+
+- [ ] 协调层测试套件（闸门/状态机/anti-reopen/focus window 回归网）
+- [ ] shouldInterject 成本短路（规则前置：刚发言/纯寒暄本地判 NO，减少每消息 LLM 调用）
+
+中期（能力扩展）：
+
 - [ ] 更多模型（Claude、Gemini、本地模型）
-- [ ] 插件市场（npm 式分发）
-- [ ] 可视化工作流编辑器
-- [ ] 分布式集群调度
+- [ ] gateway 历史权威 failover（数据已在 SQLite，缺第二实例接管协议）
 - [ ] 更多沙箱语言（Rust、Go、Java）
-- [ ] 性能基准测试套件
+
+### 不做 ✋
+
+- 插件市场 / 可视化工作流编辑器 / 分布式集群调度——当前没有真实需求拉动
+- REST API 服务——bus registry 本身就是 HTTP 轮询 API，重复建设
 
 ---
 

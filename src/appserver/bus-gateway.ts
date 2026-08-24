@@ -49,6 +49,11 @@ export interface BusGatewayConfig {
    * Default 3000. Replaces the old fixed slice(-10) window.
    */
   contextTokens?: number;
+  /**
+   * Promoted principles for a room (cumora §6.5 闭环): injected at the head
+   * of agent context so vetted knowledge actually reaches agents.
+   */
+  loadPrinciples?: (room: string) => string[];
 }
 
 export class BusGateway {
@@ -60,6 +65,7 @@ export class BusGateway {
   private historySize: number;
   private store?: RoomStore;
   private isFocused?: (agentId: string, room: string) => boolean;
+  private loadPrinciples?: (room: string) => string[];
   private contextTokens: number;
   /** Focus-window digests: `${room}:${agentId}` → held messages (cap 50, oldest dropped). */
   private digests = new Map<string, RoomMessage[]>();
@@ -81,6 +87,7 @@ export class BusGateway {
     this.historySize = config.historySize ?? 100;
     this.store = config.store;
     this.isFocused = config.isFocused;
+    this.loadPrinciples = config.loadPrinciples;
     this.contextTokens = config.contextTokens ?? 3000;
     this.transport = new HttpTransport({
       agentId: config.agentId,
@@ -161,7 +168,15 @@ export class BusGateway {
     const budgetChars = this.contextTokens * 2;
     const lines: string[] = [];
     let used = 0;
+    // Promoted principles first — high-value, small; counts against budget.
+    const principles = this.loadPrinciples?.(room) ?? [];
+    if (principles.length > 0) {
+      const line = `【本房间已验证的原则，请遵守】${principles.join('；')}`;
+      lines.push(line);
+      used += line.length;
+    }
     let omitted = 0;
+    const tail: string[] = [];
     for (let i = history.length - 1; i >= 0; i--) {
       const m = history[i];
       const text = m.text.length > 500 ? `${m.text.slice(0, 500)}…[截断]` : m.text;
@@ -170,10 +185,11 @@ export class BusGateway {
         omitted = i + 1;
         break;
       }
-      lines.unshift(line);
+      tail.unshift(line);
       used += line.length;
     }
-    if (omitted > 0) lines.unshift(`（上下文预算限制：省略了更早的 ${omitted} 条消息）`);
+    if (omitted > 0) tail.unshift(`（上下文预算限制：省略了更早的 ${omitted} 条消息）`);
+    lines.push(...tail);
     return lines;
   }
 

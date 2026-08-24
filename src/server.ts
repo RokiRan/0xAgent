@@ -115,6 +115,8 @@ if (REGISTRY_URL && harness.server) {
     // cumora §6.6 focus window: probe TaskBoard for active leases.
     // Lazy closure — taskBoard is constructed below but only called at chat time.
     isFocused: (agentId, room) => taskBoard.ownersInFocus(room).includes(agentId),
+    // cumora §6.5 闭环: promoted principles reach agent context (same lazy closure).
+    loadPrinciples: (room) => taskBoard.promotedPrinciples(room),
     store: {
       insert: (m) => { insertMsg.run(m.room, m.from, m.kind, m.text, m.ts); },
       load: (room, limit) =>

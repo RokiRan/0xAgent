@@ -258,6 +258,14 @@ export class TaskBoard {
     return this.db.prepare('SELECT * FROM room_principles WHERE room = ? ORDER BY created_at DESC').all(room) as unknown[];
   }
 
+  /** 已晋升的原则文本（含人类 pin）——注入 agent 上下文，让知识回流（cumora §6.5 闭环）。 */
+  promotedPrinciples(room: string): string[] {
+    const rows = this.db
+      .prepare('SELECT text FROM room_principles WHERE room = ? AND promoted = 1 ORDER BY created_at DESC LIMIT 20')
+      .all(room) as Array<{ text: string }>;
+    return rows.map((r) => r.text);
+  }
+
   /** Human picks a new owner for an escalated/ready task. */
   reassign(id: string, owner: string): RoomTask {
     const task = this.mustGet(id);
