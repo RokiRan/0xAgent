@@ -12,5 +12,7 @@ const port = Number(process.env.REGISTRY_PORT ?? 9876);
 createRegistryServer(port, {
   stateFile: process.env.REGISTRY_STATE_FILE,
   token: process.env.BUS_TOKEN || undefined,
+  ledgerFile: process.env.REGISTRY_LEDGER_FILE,
 });
 if (process.env.BUS_TOKEN) console.log('[AgentBus] Token gate enabled');
+if (process.env.REGISTRY_LEDGER_FILE) console.log('[AgentBus] LLM ledger enabled');

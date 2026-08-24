@@ -6,7 +6,7 @@
 
 import { Transport, BusMessage } from './bus.js';
 import { createServer, request as httpRequest, IncomingMessage, ServerResponse, Server } from 'http';
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync } from 'fs';
 
 export interface HttpTransportConfig {
   agentId: string;
@@ -357,6 +357,12 @@ export interface RegistryOptions {
   stateFile?: string;
   /** Shared token required on every endpoint when set (empty = open). */
   token?: string;
+  /**
+   * Append-only JSONL file for POST /llm-calls (cumora §7.3 台账).
+   * 系统记账走系统通道：agent 直接打到 registry，不经过对话通道，
+   * 不计入 rounds、不被其他 agent 看到。Empty = endpoint disabled (405).
+   */
+  ledgerFile?: string;
 }
 
 interface PersistedState {
@@ -426,6 +432,7 @@ export function createRegistryServer(port = 9876, options: RegistryOptions = {})
     broadcasts: 0,
     relays: 0,
     evicted: 0,
+    llmCalls: 0,
     held: {} as Record<string, number>,
   };
   const countHeld = (reason: string) => {
@@ -701,6 +708,10 @@ export function createRegistryServer(port = 9876, options: RegistryOptions = {})
             // Two-tier loop floor (cumora §6.7, tuned): human present → bounded
             // discussion cap (6/round; a discussion round ≈ 2-3 agents × 2 exchanges);
             // human absent → strict lapping.
+            //
+            // REGRESSION GUARD (docs/COORDINATION.md#1): cap 曾取 20，三 agent
+            // 在纯技术话题上 judge 恒 YES 互评无限续，1 小时 34 条广播 0 次拦截，
+            // 账单空烧。floor=6 是事故校准值，不是拍脑袋——调大前先读事故记录。
             const speakers = new Set(st.speakers).add(msg.from);
             const humanPresent = now - st.lastHumanAt < 10 * 60 * 1000;
             let cap = speakers.size;
@@ -752,6 +763,59 @@ export function createRegistryServer(port = 9876, options: RegistryOptions = {})
     // GET /metrics — gate counters (no message content, counts only)
     if (req.method === 'GET' && req.url === '/metrics') {
       sendJson(200, metrics);
+      return;
+    }
+
+    // POST /llm-calls — agent-side LLM 台账上报（append-only JSONL，fire-and-forget）
+    if (req.method === 'POST' && req.url === '/llm-calls') {
+      if (!options.ledgerFile) { sendJson(405, { error: 'Ledger not enabled' }); return; }
+      collectBody(req, (body) => {
+        try {
+          const rec = JSON.parse(body) as { agentId?: string; purpose?: string; ts?: number };
+          if (!rec.agentId || !rec.purpose) { sendJson(400, { error: 'Missing agentId or purpose' }); return; }
+          appendFileSync(options.ledgerFile!, `${JSON.stringify(rec)}\n`);
+          metrics.llmCalls++;
+          sendJson(200, { ok: true });
+        } catch {
+          sendJson(400, { error: 'Invalid JSON' });
+        }
+      });
+      return;
+    }
+
+    // GET /llm-calls/stats?hours=24 — aggregate per (purpose, agentId)
+    if (req.method === 'GET' && req.url?.startsWith('/llm-calls/stats')) {
+      if (!options.ledgerFile) { sendJson(405, { error: 'Ledger not enabled' }); return; }
+      const url = new URL(req.url, 'http://localhost');
+      const hours = Number(url.searchParams.get('hours')) || 24;
+      const since = Date.now() - hours * 3600_000;
+      const agg = new Map<string, { purpose: string; agentId: string; calls: number; errors: number; inputTokens: number; outputTokens: number }>();
+      try {
+        if (existsSync(options.ledgerFile)) {
+          for (const line of readFileSync(options.ledgerFile, 'utf8').split('\n')) {
+            if (!line.trim()) continue;
+            let rec: { ts?: number; agentId?: string; purpose?: string; status?: string; inputTokens?: number; outputTokens?: number; measured?: boolean };
+            try { rec = JSON.parse(line); } catch { continue; }
+            if (!rec.ts || rec.ts < since || !rec.agentId || !rec.purpose) continue;
+            const key = `${rec.purpose}|${rec.agentId}`;
+            let row = agg.get(key);
+            if (!row) {
+              row = { purpose: rec.purpose, agentId: rec.agentId, calls: 0, errors: 0, inputTokens: 0, outputTokens: 0 };
+              agg.set(key, row);
+            }
+            row.calls++;
+            if (rec.status && rec.status !== 'ok') row.errors++;
+            if (rec.measured) {
+              row.inputTokens += rec.inputTokens ?? 0;
+              row.outputTokens += rec.outputTokens ?? 0;
+            }
+          }
+        }
+      } catch (err) {
+        sendJson(500, { error: `Ledger read failed: ${String(err)}` });
+        return;
+      }
+      sendJson(200, { hours, rows: [...agg.values()].sort((a, b) => b.calls - a.calls) });
       return;
     }
 

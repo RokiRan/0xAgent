@@ -83,6 +83,7 @@ export class MiniMaxProvider implements ModelProvider {
           }>;
         };
       }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
 
     const choice = data.choices[0].message;
@@ -95,6 +96,9 @@ export class MiniMaxProvider implements ModelProvider {
     return {
       content: choice.content ?? '',
       toolCalls,
+      usage: data.usage
+        ? { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens }
+        : undefined,
     };
   }
 }

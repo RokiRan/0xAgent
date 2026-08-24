@@ -19,6 +19,11 @@ export interface ToolCall {
 export interface ModelResponse {
   content: string;
   toolCalls?: ToolCall[];
+  /**
+   * Provider-reported token usage. Absent = provider did not report;
+   * ledger records such calls with measured=false and NEVER guesses (cumora §7.3).
+   */
+  usage?: { inputTokens?: number; outputTokens?: number };
 }
 
 export interface ModelProvider {

@@ -51,6 +51,12 @@ export interface HarnessV2Config {
   };
   // Memory
   enableMemory?: boolean;
+  /**
+   * Optional decorator applied to the model provider before AppServerV2
+   * receives it — the single wiring point for cross-cutting concerns
+   * (e.g. RecordingProvider for the LLM ledger, cumora §7.3).
+   */
+  modelWrapper?: (provider: ModelProvider) => ModelProvider;
 }
 
 export class HarnessV2 {
@@ -104,7 +110,7 @@ export class HarnessV2 {
       : undefined;
 
     this.appServer = await AppServerV2.create({
-      model: this.model,
+      model: this.config.modelWrapper ? this.config.modelWrapper(this.model) : this.model,
       tools: this.tools,
       approver,
       promptBuilder,

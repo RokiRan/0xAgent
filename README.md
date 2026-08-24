@@ -110,6 +110,8 @@ export OPENAI_API_KEY=sk-...
 export MINIMAX_API_KEY=sk-...
 export MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 export MINIMAX_MODEL=MiniMax-M3
+# 可选：双脑分流——judge/vote/promise/verify 走小脑（不设则全部走主模型）
+export MINIMAX_MODEL_SMALL=MiniMax-M2.5
 
 # 可选：持久化路径
 export AGENT_DB_PATH=./data/threads.db
@@ -406,12 +408,31 @@ stateDiagram-v2
 
 `promise/create` 产生承诺候选，**agent 确认后才入依赖图**；`dep/add` 登记依赖边（防环）。阻塞驱动催办：只点名关键路径上逾期的阻塞者，同一依赖边 45 分钟冷却。
 
+### LLM 台账与双脑（cumora §7 适配）
+
+- **台账**：每次出站 LLM 调用记账（agent/purpose/model/token/延迟/状态）。server 侧经 `RecordingProvider` 装饰器在 provider 层收口（漏点为零）落 SQLite `llm_calls`；agent 侧上报 registry `POST /llm-calls`（追加 JSONL）——系统记账走系统通道，不污染对话通道不计入 rounds。fire-and-forget：记账失败绝不阻塞调用；provider 未报用量时 `measured=false` 记 0，**绝不猜测**
+- **双脑**：reply/task 走主模型（`MINIMAX_MODEL`），judge/vote/promise/verify 走小脑（`MINIMAX_MODEL_SMALL`，未设回落主模型——策略收口在位，行为不变）
+- 查询：`llm/stats` 合并 server（SQLite）与 agents（registry JSONL）两侧聚合视图
+
+### 验收门（Verify，cumora §10.1.1 适配）
+
+agent 提交任务 evidence 后、进 `review` 前，小脑对账 acceptance × evidence（「确认 ≠ 交付」）。`complete=false` → 自动退回返工并附 `next_step`；连续 2 次不过仍进 `review` 但标红留人裁；验收器自身故障按 `complete:false` 处理——宁可多烧跳数不放过假完成。
+
+### 定时提醒（future-you，cumora §9.2.1 适配）
+
+`reminder/create`（或 agent 经 bus request `kind:'reminder'` 直连 gateway）把"我以后再做"变成服务器担保的唤醒：60s tick 到点 → 系统消息落房 + 直连唤醒 assignee。派发幂等（`UPDATE ... WHERE status='pending'` 认领），投递失败不回滚——房间记录兜底，agent 下次活跃自然补见。
+
+### 事故著录
+
+多 agent 协调的反模式与事故记录（含常量校准依据）见 [docs/COORDINATION.md](docs/COORDINATION.md)。改协调闸门数值前必读。
+
 ### 部署
 
 ```bash
 # Registry（公网节点，单文件零依赖）
 npx esbuild src/registry-server.ts --bundle --platform=node --format=esm --outfile=registry.mjs
 REGISTRY_PORT=9876 REGISTRY_STATE_FILE=./registry-state.json \
+REGISTRY_LEDGER_FILE=./llm-calls.jsonl \
 BUS_TOKEN=shared-secret node registry.mjs
 
 # Bus Agent（任意机器）
@@ -592,6 +613,9 @@ npm run server
 | `principle/propose` | `{ room, text, taskId? }` | 登记 episode 经验 |
 | `principle/promote` / `principle/pin` | `{ principleId }` | 晋升（需 ≥2 来源）/ 人类 pin |
 | `principle/list` | `{ room }` | 原则列表 |
+| `reminder/create` | `{ room, agent, prompt, at }` | 定时提醒（at = epoch ms 或 ISO 字符串） |
+| `reminder/list` / `reminder/cancel` | `{ room }` / `{ reminderId }` | 提醒列表 / 取消 |
+| `llm/stats` | `{ hours? }` | LLM 台账聚合（server + agents 两侧） |
 | `metrics/get` | - | 任务/决策/gateway/registry 计数汇总 |
 
 ### 通知 (Server → Client)

@@ -50,6 +50,14 @@ export interface TaskBoardDeps {
   postMessage: (room: string, text: string) => void;
   /** Channel members from the registry (for reassignment scoring). */
   listMembers: (room: string) => Promise<string[]>;
+  /**
+   * 验收门（cumora §10.1.1 适配）：submit 进 review 前，小脑对账
+   * acceptance × evidence。complete=false → 自动退回返工（带 nextStep），
+   * 连续 MAX_VERIFY_REJECTS 次不过仍进 review 但标红留人裁。
+   * 验收器自身抛错按 complete:false 处理——宁可多烧跳数不放过假完成。
+   * 未配置 = 门不存在（行为同旧版）。
+   */
+  verifyCompletion?: (task: RoomTask, evidenceText: string) => Promise<{ complete: boolean; reason?: string; nextStep?: string }>;
   /** Lease duration on (re)assignment. Default 30 min. */
   leaseMs?: number;
   /** Reaper sweep interval. Default 30s. */
@@ -57,7 +65,9 @@ export interface TaskBoardDeps {
 }
 
 export class TaskBoard {
-  readonly metrics = { leaseExpired: 0, reassigned: 0, escalated: 0, autoDefaulted: 0, nudged: 0 };
+  readonly metrics = { leaseExpired: 0, reassigned: 0, escalated: 0, autoDefaulted: 0, nudged: 0, verifyRejected: 0 };
+  /** 验收器自动退回上限：超过则进 review 标红留人裁（防验收死循环烧钱）。 */
+  private static readonly MAX_VERIFY_REJECTS = 2;
   private db: Database;
   private deps: TaskBoardDeps;
   private leaseMs: number;
@@ -87,6 +97,7 @@ export class TaskBoard {
       'ALTER TABLE room_tasks ADD COLUMN reassign_count INTEGER NOT NULL DEFAULT 0',
       'ALTER TABLE room_tasks ADD COLUMN adr TEXT',
       "ALTER TABLE room_tasks ADD COLUMN risk TEXT NOT NULL DEFAULT 'low'",
+      'ALTER TABLE room_tasks ADD COLUMN verify_rejects INTEGER NOT NULL DEFAULT 0',
     ]) {
       try { this.db.exec(ddl); } catch { /* column already exists */ }
     }
@@ -393,7 +404,7 @@ export class TaskBoard {
       const res = await this.deps.requestAgent(owner, payload, 5 * 60 * 1000);
       if (res && typeof res === 'object' && 'action' in res) {
         if (res.action === 'submit' && 'evidence' in res && typeof res.evidence === 'string') {
-          this.onSubmit(taskId, res.evidence);
+          await this.onSubmit(taskId, res.evidence);
           return;
         }
         if (res.action === 'failed' && 'error' in res) {
@@ -408,9 +419,43 @@ export class TaskBoard {
     }
   }
 
-  private onSubmit(taskId: string, evidenceText: string): void {
+  private async onSubmit(taskId: string, evidenceText: string): Promise<void> {
     const task = this.mustGet(taskId);
     const evidence = [...task.evidence, evidenceText];
+    // 验收门（cumora §10.1.1）：「👀 确认 ≠ 交付」的小脑语义对账。
+    // 真相源是 acceptance × evidence 的对账结果，不是 agent 的自称。
+    if (this.deps.verifyCompletion && task.owner) {
+      let verdict: { complete: boolean; reason?: string; nextStep?: string };
+      try {
+        verdict = await this.deps.verifyCompletion(task, evidenceText);
+      } catch {
+        // 验收器故障按 complete:false 处理（cumora：宁可多烧跳数不放过假完成）
+        verdict = { complete: false, reason: '验收器自身故障（超时/非法输出），按未通过处理' };
+      }
+      if (!verdict.complete) {
+        const rejects = ((this.db.prepare('SELECT verify_rejects AS r FROM room_tasks WHERE id = ?').get(taskId) as { r: number }).r ?? 0) + 1;
+        this.db.prepare('UPDATE room_tasks SET verify_rejects = ? WHERE id = ?').run(rejects, taskId);
+        this.metrics.verifyRejected++;
+        const note = `验收未通过：${verdict.reason ?? '证据与验收标准不对账'}${verdict.nextStep ? `。下一步：${verdict.nextStep}` : ''}`;
+        if (rejects <= TaskBoard.MAX_VERIFY_REJECTS) {
+          this.db
+            .prepare('UPDATE room_tasks SET evidence = ?, state = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?')
+            .run(JSON.stringify(evidence), 'in_progress', Date.now() + this.leaseMs, Date.now(), taskId);
+          this.deps.postMessage(task.room, `🔍 任务「${task.title}」被验收器退回（第 ${rejects}/${TaskBoard.MAX_VERIFY_REJECTS} 次）：${note}`);
+          void this.dispatch(task.owner, task.room, task.id, {
+            kind: 'task', action: 'rework', taskId: task.id, room: task.room,
+            title: task.title, acceptance: task.acceptance, note,
+          });
+          return;
+        }
+        // 连续被拒：不无限返工，进 review 标红留人裁（门禁磨损不静默）
+        this.db
+          .prepare('UPDATE room_tasks SET evidence = ?, state = ?, lease_expires_at = NULL, updated_at = ? WHERE id = ?')
+          .run(JSON.stringify(evidence), 'review', Date.now(), taskId);
+        this.deps.postMessage(task.room, `🟥 任务「${task.title}」连续 ${rejects} 次未过验收器（最近：${note}），已进入 review 留 ${task.approver} 人工裁定`);
+        return;
+      }
+    }
     this.db
       .prepare('UPDATE room_tasks SET evidence = ?, state = ?, lease_expires_at = NULL, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(evidence), 'review', Date.now(), taskId);

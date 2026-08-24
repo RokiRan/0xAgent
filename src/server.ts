@@ -11,9 +11,13 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import Database from 'better-sqlite3';
 import { BusGateway, RoomMessage } from './appserver/bus-gateway.js';
-import { TaskBoard } from './appserver/task-board.js';
+import { TaskBoard, RoomTask } from './appserver/task-board.js';
 import { DecisionBoard } from './appserver/decision-board.js';
 import { startRetention } from './appserver/retention.js';
+import { LlmLedger } from './appserver/llm-ledger.js';
+import { ReminderBoard } from './appserver/reminders.js';
+import { RecordingProvider } from './plugins/model/recording.js';
+import { MiniMaxProvider } from './plugins/model/minimax.js';
 import { createResponse, createError, createNotification, JsonRpcRequest } from './appserver/protocol.js';
 
 function loadEnvConfig(): Partial<HarnessV2Config> {
@@ -50,8 +54,28 @@ const DB_PATH = process.env.AGENT_DB_PATH ?? './data/threads.db';
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const PORT = Number(process.env.AGENT_PORT ?? 3456);
 
+// Room-side tables share one connection (sync driver serializes).
+// Hoisted above HarnessV2 so the LLM ledger sink exists before modelWrapper runs.
+const chatDb = new Database(DB_PATH);
+chatDb.exec(`CREATE TABLE IF NOT EXISTS room_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  room TEXT NOT NULL,
+  sender TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  ts INTEGER NOT NULL
+)`);
+chatDb.exec('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room, id)');
+const llmLedger = new LlmLedger(chatDb);
+
 const harness = new HarnessV2({
   ...envConfig,
+  // cumora §7.3 台账：主回路每次调用记账，fire-and-forget，绝不阻塞调用
+  modelWrapper: (p) => new RecordingProvider(
+    p,
+    { agentId: 'appserver', purpose: 'turn', model: envConfig.model?.model ?? 'unknown' },
+    llmLedger.record,
+  ),
   filesystem: {
     rootPath: process.cwd(),
   },
@@ -88,17 +112,7 @@ let busGateway: BusGateway | undefined;
 if (REGISTRY_URL && harness.server) {
   const appServer = harness.server;
 
-  // Room chat persistence (second connection to the same DB file; sync driver serializes)
-  const chatDb = new Database(DB_PATH);
-  chatDb.exec(`CREATE TABLE IF NOT EXISTS room_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    room TEXT NOT NULL,
-    sender TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    text TEXT NOT NULL,
-    ts INTEGER NOT NULL
-  )`);
-  chatDb.exec('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room, id)');
+  // chatDb + room_messages created above (before harness); reuse here.
   const insertMsg = chatDb.prepare('INSERT INTO room_messages (room, sender, kind, text, ts) VALUES (?, ?, ?, ?, ?)');
   const loadMsg = chatDb.prepare('SELECT room, sender, kind, text, ts FROM room_messages WHERE room = ? ORDER BY id DESC LIMIT ?');
   startRetention(chatDb);
@@ -110,6 +124,9 @@ if (REGISTRY_URL && harness.server) {
     registryUrl: REGISTRY_URL,
     registryToken: process.env.BUS_TOKEN || undefined,
     userName: process.env.BUS_USER_NAME ?? 'me',
+    // REGRESSION GUARD (docs/COORDINATION.md#2): channels 必须传进 transport
+    // （heartbeat 每次重 join）。曾经漏传 → registry 重启后 gateway 丢成员籍，
+    // 所有 agent 回复 403 静默消失。删这行 = 复现该事故。
     channels: (process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean),
     contextTokens: Number(process.env.BUS_CONTEXT_TOKENS) || 3000,
     // cumora §6.6 focus window: probe TaskBoard for active leases.
@@ -117,6 +134,8 @@ if (REGISTRY_URL && harness.server) {
     isFocused: (agentId, room) => taskBoard.ownersInFocus(room).includes(agentId),
     // cumora §6.5 闭环: promoted principles reach agent context (same lazy closure).
     loadPrinciples: (room) => taskBoard.promotedPrinciples(room),
+    // future-you（cumora §9.2.1）: agent 经 bus request 排定时唤醒（lazy closure，同 isFocused）
+    createReminder: (room, agentId, prompt, scheduledFor) => reminderBoard.create(room, agentId, prompt, scheduledFor),
     store: {
       insert: (m) => { insertMsg.run(m.room, m.from, m.kind, m.text, m.ts); },
       load: (room, limit) =>
@@ -156,10 +175,39 @@ if (REGISTRY_URL && harness.server) {
   });
 
   // Task board (Task/Contract + Lease)
+  // 验收门小脑（cumora §10.1.1 + §7 双脑）：verify 走 MINIMAX_MODEL_SMALL，
+  // 经 RecordingProvider 入台账（purpose='verify'）。10s 短超时——辅助调用 fail-fast。
+  let verifyCompletion: ((task: RoomTask, evidenceText: string) => Promise<{ complete: boolean; reason?: string; nextStep?: string }>) | undefined;
+  if (envConfig.modelProvider === 'minimax' && envConfig.model?.apiKey) {
+    const smallModel = process.env.MINIMAX_MODEL_SMALL ?? envConfig.model.model ?? 'MiniMax-M3';
+    const verifier = new RecordingProvider(
+      new MiniMaxProvider({ apiKey: envConfig.model.apiKey, baseUrl: envConfig.model.baseUrl, model: smallModel }),
+      { agentId: 'appserver', purpose: 'verify', model: smallModel },
+      llmLedger.record,
+    );
+    verifyCompletion = async (task, evidenceText) => {
+      const criteria = task.acceptance.map((a, i) => `${i + 1}. ${a}`).join('\n');
+      const gen = verifier.generate([
+        { role: 'system', content: `你是验收员。对照验收标准审查交付证据，只用 JSON 回答 {"complete": boolean, "reason": string, "next_step": string}。
+规则：人类要了交付物而证据只是"收到/我看看"式的确认，complete 必须为 false（确认 ≠ 交付）。
+验收的是"任务被完成"，不要求逐条措辞对应，但每条标准都要有实质证据支撑。拿不准判 false。` },
+        { role: 'user', content: `任务：${task.title}\n验收标准：\n${criteria}\n\n交付证据：\n${evidenceText.slice(0, 8000)}` },
+      ]);
+      const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error('verify timeout')), 10_000));
+      const res = await Promise.race([gen, timeout]);
+      const text = res.content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+      const m = text.match(/\{[\s\S]*\}/);
+      if (!m) throw new Error('verifier returned non-JSON');
+      const v = JSON.parse(m[0]) as { complete?: boolean; reason?: string; next_step?: string };
+      return { complete: v.complete === true, reason: v.reason, nextStep: v.next_step };
+    };
+  }
+
   const taskBoard = new TaskBoard(chatDb, {
     requestAgent: (target, payload, timeoutMs) => busGateway!.requestAgent(target, payload, timeoutMs),
     postMessage: (room, text) => busGateway!.postSystemMessage(room, text),
     listMembers: (room) => busGateway!.listMembers(room),
+    verifyCompletion,
   });
   // cumora §6.6: window-end digest delivery — flush on task transitions and
   // a 30s sweep (covers lease-expiry recycle ending a window with no RPC).
@@ -283,6 +331,44 @@ if (REGISTRY_URL && harness.server) {
   });
   console.log(`[server] TaskBoard ready (room_tasks)`);
 
+  // Reminder board (future-you, cumora §9.2.1)
+  const reminderBoard = new ReminderBoard(chatDb, {
+    postMessage: (room, text) => busGateway!.postSystemMessage(room, text),
+    deliver: (room, agentId, prompt) => busGateway!.remindAgent(room, agentId, prompt),
+  });
+  appServer.registerMethod('reminder/create', (req) => {
+    const room = param(req, 'room');
+    const agent = param(req, 'agent');
+    const prompt = param(req, 'prompt');
+    const p = req.params as Record<string, unknown> | undefined;
+    const atRaw = p?.at;
+    const at = typeof atRaw === 'number' ? atRaw : typeof atRaw === 'string' ? Date.parse(atRaw) : NaN;
+    if (!room || !agent || !prompt || !Number.isFinite(at)) {
+      return createError(req.id, -32602, 'Missing room/agent/prompt or invalid at (epoch ms or ISO string)');
+    }
+    try {
+      return createResponse(req.id, { reminder: reminderBoard.create(room, agent, prompt, at) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  appServer.registerMethod('reminder/list', (req) => {
+    const room = param(req, 'room');
+    if (!room) return createError(req.id, -32602, 'Missing room');
+    return createResponse(req.id, { reminders: reminderBoard.list(room) });
+  });
+  appServer.registerMethod('reminder/cancel', (req) => {
+    const id = param(req, 'reminderId');
+    if (!id) return createError(req.id, -32602, 'Missing reminderId');
+    try {
+      reminderBoard.cancel(id);
+      return createResponse(req.id, { ok: true });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+  console.log(`[server] ReminderBoard ready (room_reminders)`);
+
   // Decision board (quorum + timebox + anti-reopen)
   const decisionBoard = new DecisionBoard(chatDb, {
     requestAgent: (target, payload, timeoutMs) => busGateway!.requestAgent(target, payload, timeoutMs),
@@ -382,6 +468,22 @@ if (REGISTRY_URL && harness.server) {
       gateway: busGateway!.health,
       registry,
     });
+  });
+
+  // LLM 台账（cumora §7.3）：本地 SQLite（server 侧调用）+ registry JSONL（agent 上报）合并视图
+  appServer.registerMethod('llm/stats', async (req) => {
+    const p = req.params as Record<string, unknown> | undefined;
+    const hours = typeof p?.hours === 'number' ? p.hours : 24;
+    let remote: unknown;
+    try {
+      const res = await fetch(`${REGISTRY_URL}/llm-calls/stats?hours=${hours}`, {
+        headers: process.env.BUS_TOKEN ? { 'x-bus-token': process.env.BUS_TOKEN } : {},
+      });
+      remote = res.ok ? ((await res.json()) as { rows?: unknown }).rows ?? [] : { error: `HTTP ${res.status}` };
+    } catch {
+      remote = { error: 'registry unreachable' };
+    }
+    return createResponse(req.id, { hours, server: llmLedger.stats(hours), agents: remote });
   });
   console.log(`[server] Bus gateway "${process.env.BUS_AGENT_ID ?? 'web-gateway'}" -> ${REGISTRY_URL}`);
 }

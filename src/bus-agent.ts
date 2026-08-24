@@ -15,6 +15,8 @@ import os from 'node:os';
 import { AgentBusImpl } from './plugins/agent-bus/bus.js';
 import { HttpTransport } from './plugins/agent-bus/http-transport.js';
 import { MiniMaxProvider } from './plugins/model/minimax.js';
+import { RecordingProvider, httpLedgerSink } from './plugins/model/recording.js';
+import type { ModelProvider } from './plugins/model/interface.js';
 
 const agentId = process.env.AGENT_ID ?? '';
 const registryUrl = process.env.REGISTRY_URL ?? '';
@@ -25,13 +27,33 @@ if (!agentId || !registryUrl) {
 const channel = process.env.BUS_CHANNEL ?? 'team';
 const persona = process.env.AGENT_PERSONA ?? '';
 
-const model = process.env.MINIMAX_API_KEY
-  ? new MiniMaxProvider({
-      apiKey: process.env.MINIMAX_API_KEY,
-      baseUrl: process.env.MINIMAX_BASE_URL,
-      model: process.env.MINIMAX_MODEL,
-    })
-  : undefined;
+// 双脑（cumora §7）：大脑只花在人会读的产出（reply/task），
+// judge/vote/promise 这类守门判断走小脑。MINIMAX_MODEL_SMALL 未设时回落主模型
+// （策略收口在位，行为不变），设置后立即分流。
+const BIG_MODEL = process.env.MINIMAX_MODEL ?? 'MiniMax-M3';
+const SMALL_MODEL = process.env.MINIMAX_MODEL_SMALL ?? BIG_MODEL;
+
+// 台账（cumora §7.3）：provider 层收口记账，上报 registry /llm-calls，
+// fire-and-forget——上报失败绝不影响调用本身。
+const ledgerSink = httpLedgerSink(registryUrl, process.env.BUS_TOKEN || undefined);
+
+let replyModel: ModelProvider | undefined;
+let taskModel: ModelProvider | undefined;
+let judgeModel: ModelProvider | undefined;
+let voteModel: ModelProvider | undefined;
+let promiseModel: ModelProvider | undefined;
+if (process.env.MINIMAX_API_KEY) {
+  const base = { apiKey: process.env.MINIMAX_API_KEY, baseUrl: process.env.MINIMAX_BASE_URL };
+  const big = new MiniMaxProvider({ ...base, model: BIG_MODEL });
+  const small = SMALL_MODEL === BIG_MODEL ? big : new MiniMaxProvider({ ...base, model: SMALL_MODEL });
+  const wrap = (inner: ModelProvider, purpose: string, model: string) =>
+    new RecordingProvider(inner, { agentId, purpose, model }, ledgerSink);
+  replyModel = wrap(big, 'reply', BIG_MODEL);
+  taskModel = wrap(big, 'task', BIG_MODEL);
+  judgeModel = wrap(small, 'judge', SMALL_MODEL);
+  voteModel = wrap(small, 'vote', SMALL_MODEL);
+  promiseModel = wrap(small, 'promise', SMALL_MODEL);
+}
 
 function extractText(payload: unknown): string {
   if (typeof payload === 'string') return payload;
@@ -60,8 +82,8 @@ function contextBlock(context: string[]): string {
 }
 
 async function answerText(text: string, from: string, context: string[] = []): Promise<string> {
-  if (!model) return `${agentId}@${os.hostname()} 收到: ${text}`;
-  const res = await model.generate([
+  if (!replyModel) return `${agentId}@${os.hostname()} 收到: ${text}`;
+  const res = await replyModel.generate([
     { role: 'system', content: `You are agent "${agentId}" running on host "${os.hostname()}", in a group chat.${persona ? ` 你的专长：${persona}。` : ''} Answer concisely in Chinese.` },
     { role: 'user', content: `${contextBlock(context)}现在 ${from} 说：${text}` },
   ]);
@@ -73,8 +95,8 @@ async function answerText(text: string, from: string, context: string[] = []): P
  * Returns true only when the message clearly concerns this agent.
  */
 async function shouldInterject(text: string, from: string, context: string[] = []): Promise<boolean> {
-  if (!model) return false; // no LLM → cannot judge → stay silent
-  const res = await model.generate([
+  if (!judgeModel) return false; // no LLM → cannot judge → stay silent
+  const res = await judgeModel.generate([
     {
       role: 'system',
       content: `你是群聊中的 agent「${agentId}」，运行在 ${os.hostname()}。${persona ? `你的专长：${persona}。` : ''}判断是否回应这条群聊消息。
@@ -129,8 +151,8 @@ ${action === 'rework' ? `上一次交付被退回，退回原因：${note}\n请�
 请直接完成任务并给出交付物。你的回复将全文作为验收证据提交，请确保逐条满足验收标准。`;
 
   try {
-    const answer = model
-      ? stripThink((await model.generate([
+    const answer = taskModel
+      ? stripThink((await taskModel.generate([
           { role: 'system', content: `You are agent "${agentId}".${persona ? ` 你的专长：${persona}。` : ''} 完成任务并用中文交付。` },
           { role: 'user', content: prompt },
         ])).content ?? '')
@@ -152,13 +174,13 @@ async function handleDecisionVote(payload: object, reply: (r: unknown) => void):
       : [];
 
   console.log(`[${agentId}] decision vote: ${question.slice(0, 80)}`);
-  if (!model || options.length === 0) {
+  if (!voteModel || options.length === 0) {
     reply({ kind: 'decision', decisionId, option: '', rationale: '无法投票' });
     return;
   }
   const optLines = options.map((o, i) => `${i + 1}. ${o}`).join('\n');
   try {
-    const res = await model.generate([
+    const res = await voteModel.generate([
       { role: 'system', content: `你是 agent「${agentId}」。${persona ? `你的专长：${persona}。` : ''} 对议题投票：必须从给定选项中选一个，第一行只写所选选项的原文，第二行写一句话理由（从你的专长视角）。` },
       { role: 'user', content: `议题：${question}\n${criterion ? `判定标准：${criterion}\n` : ''}选项：\n${optLines}` },
     ]);
@@ -180,12 +202,12 @@ async function handlePromiseConfirm(payload: object, reply: (r: unknown) => void
   const promiseId = 'promiseId' in payload && typeof payload.promiseId === 'string' ? payload.promiseId : '';
   const taskTitle = 'taskTitle' in payload && typeof payload.taskTitle === 'string' ? payload.taskTitle : '';
   const dueAt = 'dueAt' in payload && typeof payload.dueAt === 'string' ? payload.dueAt : '';
-  if (!model) {
+  if (!promiseModel) {
     reply({ kind: 'promise', promiseId, confirm: false, note: '无 LLM，不轻诺' });
     return;
   }
   try {
-    const res = await model.generate([
+    const res = await promiseModel.generate([
       { role: 'system', content: `你是 agent「${agentId}」。${persona ? `你的专长：${persona}。` : ''} 有人向你登记一个交付承诺。只承诺你专长内且可行的事；拿不准就拒绝。第一行只写 YES 或 NO，第二行一句话理由。` },
       { role: 'user', content: `任务：${taskTitle}\n交付时限：${dueAt}` },
     ]);

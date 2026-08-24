@@ -56,6 +56,11 @@ export interface BusGatewayConfig {
   loadPrinciples?: (room: string) => string[];
   /** @mention request timeout (ms). Default 90000; tests set it short. */
   requestTimeoutMs?: number;
+  /**
+   * future-you（cumora §9.2.1）：agent 经 bus request kind:'reminder'
+   * 给自己或他人排定时唤醒。直连 relay（非广播），不污染房间 rounds。
+   */
+  createReminder?: (room: string, agentId: string, prompt: string, scheduledFor: number) => unknown;
 }
 
 export class BusGateway {
@@ -104,6 +109,31 @@ export class BusGateway {
 
     // Agents may broadcast chat events into the room; surface them as messages.
     this.bus.onMessage((msg) => this.onBusEvent(msg));
+
+    // future-you: agents schedule reminders via direct bus request (RPC plane,
+    // not the chat channel — never counted in rounds, never shown to peers).
+    this.bus.onRequest((payload, reply) => {
+      if (
+        payload && typeof payload === 'object' && 'kind' in payload && payload.kind === 'reminder' &&
+        'agent' in payload && typeof payload.agent === 'string' &&
+        'prompt' in payload && typeof payload.prompt === 'string' &&
+        'at' in payload && typeof payload.at === 'number' &&
+        'room' in payload && typeof payload.room === 'string'
+      ) {
+        if (!config.createReminder) {
+          reply({ ok: false, error: 'reminders not enabled' });
+          return;
+        }
+        try {
+          const created = config.createReminder(payload.room, payload.agent, payload.prompt, payload.at);
+          reply({ ok: true, reminder: created });
+        } catch (err) {
+          reply({ ok: false, error: String(err instanceof Error ? err.message : err) });
+        }
+        return;
+      }
+      // Unknown kinds: no reply (preserves pre-reminder behavior for stray requests).
+    });
   }
 
   async connect(): Promise<void> {
@@ -121,6 +151,19 @@ export class BusGateway {
   /** Direct bus request to an agent (used by TaskBoard for assign/rework). */
   async requestAgent(target: string, payload: unknown, timeoutMs = 90000): Promise<unknown> {
     return this.bus.request(target, payload, timeoutMs);
+  }
+
+  /**
+   * future-you 投递（cumora §9.2.1）：到点提醒直连唤醒 assignee，
+   * 回复回落房间（与 @mention 同路径）。失败抛出由调用方决定文案。
+   */
+  async remindAgent(room: string, agentId: string, prompt: string): Promise<void> {
+    const res = await this.bus.request(
+      agentId,
+      { kind: 'chat', room, from: 'reminder', human: true, text: `【定时提醒】${prompt}`, context: this.buildContext(room) },
+      this.requestTimeoutMs,
+    );
+    this.emit({ room, from: agentId, kind: 'agent', text: this.extractReplyText(res), ts: Date.now() });
   }
 
   get health(): { degraded: boolean; storeFailures: number } {
