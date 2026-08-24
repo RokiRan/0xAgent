@@ -1,7 +1,8 @@
-# Agent Harness
+# Agent Harness (npm: 0xagent)
 
 > 生产级 AI Agent 框架。插件化架构、多模型支持、安全沙箱、持久化会话、向量记忆、并行调度、MCP 协议兼容、跨网络多 Agent 协作（渠道中继 + 协调闸门 + 任务/决策/承诺硬对象）。
 
+[![npm version](https://img.shields.io/npm/v/0xagent)](https://www.npmjs.com/package/0xagent)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -92,12 +93,45 @@ Agent Harness 是一个受 [DeepSeek Harness](https://github.com/deepseek-ai/awe
 
 ## 快速开始
 
-### 安装
+### 方式一：npm 全局安装（推荐）
 
 ```bash
-git clone <repo-url>
-cd agent-harness
+npm install -g 0xagent    # 需要 Node >= 22
+```
+
+提供 5 个命令：
+
+| 命令 | 用途 |
+|------|------|
+| `agent-harness` | CLI 交互模式（stdio REPL） |
+| `agent-harness-v2` | CLI V2（Codex 风格 Thread/Turn） |
+| `agent-harness-server` | Web UI 无头服务（含多 agent 聊天室，:3456） |
+| `agent-harness-registry` | Agent Bus 渠道中继（放公网节点，:9876） |
+| `bus-agent` | 独立总线 agent（加入渠道、应答/插嘴/执行任务） |
+
+```bash
+# 1. Web UI（最常用）
+export AGENT_MODEL_PROVIDER=minimax MINIMAX_API_KEY=sk-...
+agent-harness-server    # 打开 http://localhost:3456
+
+# 2. Registry 中继（多 agent 跨网络协作时，放公网节点）
+agent-harness-registry  # 默认 :9876，REGISTRY_PORT 可改
+
+# 3. 在任意机器上加一个 agent 进群
+AGENT_ID=gpu-agent REGISTRY_URL=http://<registry>:9876 \
+BUS_CHANNEL=team MINIMAX_API_KEY=sk-... bus-agent
+
+# 4. CLI 对话
+agent-harness-v2
+```
+
+### 方式二：源码构建
+
+```bash
+git clone https://github.com/RokiRan/0xAgent.git
+cd 0xAgent
 npm install
+npm run build && npm test
 ```
 
 ### 环境配置
@@ -117,7 +151,7 @@ export MINIMAX_MODEL_SMALL=MiniMax-M2.5
 export AGENT_DB_PATH=./data/threads.db
 ```
 
-### 启动方式
+### 源码模式启动
 
 ```bash
 # 1. CLI 模式（stdio）
@@ -128,8 +162,8 @@ AGENT_MODEL_PROVIDER=minimax MINIMAX_API_KEY=sk-... \
 BUS_REGISTRY_URL=http://localhost:9876 npm run server
 # 打开 http://localhost:3456
 
-# 3. Registry 中继（多 agent 跨网络协作时，放公网节点）
-npm run registry   # 默认 :9876，REGISTRY_PORT 可改
+# 3. Registry 中继
+npm run registry
 
 # 4. MCP Server 模式：由 mcp 插件按配置激活（config.server.enabled + transport:'stdio'），
 #    见 src/mcp/plugin.ts；无独立 npm script
@@ -481,7 +515,7 @@ BUS_TOKEN=shared-secret npm run server
   "mcpServers": {
     "agent-harness": {
       "command": "node",
-      "args": ["/path/to/agent-harness/dist/mcp/stdio-server.js"]
+      "args": ["/path/to/0xAgent/dist/mcp/stdio-server.js"]
     }
   }
 }
@@ -716,7 +750,7 @@ const harness = new HarnessV2({
 ## 项目结构
 
 ```
-agent-harness/
+0xAgent/
 ├── src/
 │   ├── core/                      # 核心框架
 │   │   ├── kernel.ts              # 插件内核
@@ -797,8 +831,22 @@ npm run build:watch  # 监视模式
 ### 测试
 
 ```bash
-npm test             # 运行测试
+npm test             # 协调层回归套件（57 tests，node:test + tsx，Node >= 22）
+npm run typecheck    # tsc 全量（含 test/）
 ```
+
+### 发版（npm）
+
+包以 **Trusted Publishing（OIDC）** 发布，无需 token/OTP：
+
+```bash
+# 1. 更新 package.json version
+# 2. 提交后打 tag 并推送
+git tag v0.x.y && git push origin v0.x.y
+# → GitHub Actions (publish.yml) 自动 build + test + npm publish --provenance
+```
+
+Trusted Publisher 配置在 [npm 包设置页](https://www.npmjs.com/package/0xagent/access)（GitHub Actions → RokiRan/0xAgent → publish.yml）。手动应急发布：`npm publish --otp=<TOTP 或 recovery code>`。
 
 ### 添加新模型
 
