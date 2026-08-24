@@ -19,12 +19,19 @@ export interface HttpTransportConfig {
   channel?: string;
   /** Extra channels to join on connect. */
   channels?: string[];
+  /**
+   * 能力档案提供器（agent-card）：每次 /register 心跳随车携带，
+   * registry 重启后卡片随心跳自愈（同渠道成员籍模式）。
+   */
+  card?: () => unknown;
 }
 
 interface PeerInfo {
   agentId: string;
   url: string;
   lastSeen: number;
+  /** 能力档案（agent-card 自报，随 /register 心跳刷新与快照持久化）。 */
+  card?: unknown;
 }
 
 /**
@@ -46,6 +53,7 @@ export class HttpTransport implements Transport {
   private registryToken?: string;
   private channel: string;
   private extraChannels: string[];
+  private cardProvider?: () => unknown;
   private heartbeatInterval?: ReturnType<typeof setInterval>;
   private pollInterval?: ReturnType<typeof setInterval>;
   private useRegistryRelay: boolean;
@@ -58,6 +66,7 @@ export class HttpTransport implements Transport {
     this.registryToken = config.registryToken;
     this.channel = config.channel ?? 'default';
     this.extraChannels = config.channels ?? [];
+    this.cardProvider = config.card;
     // If registryUrl is set, we use registry relay for cross-network scenarios
     this.useRegistryRelay = !!config.registryUrl;
   }
@@ -280,6 +289,7 @@ export class HttpTransport implements Transport {
     await this.postJson(`${this.registryUrl}/register`, {
       agentId: this.agentId,
       url: `http://${this.host}:${this.port}`,
+      card: this.cardProvider?.(),
     }).catch(() => {});
     // Self-heal: re-ensure home + extra channels on every heartbeat.
     // Registry is in-memory; if it restarted, channels vanish and this rebuilds them.
@@ -463,8 +473,8 @@ export function createRegistryServer(port = 9876, options: RegistryOptions = {})
     if (req.method === 'POST' && req.url === '/register') {
       collectBody(req, (body) => {
         try {
-          const data = JSON.parse(body) as { agentId: string; url: string };
-          agents.set(data.agentId, { agentId: data.agentId, url: data.url, lastSeen: Date.now() });
+          const data = JSON.parse(body) as { agentId: string; url: string; card?: unknown };
+          agents.set(data.agentId, { agentId: data.agentId, url: data.url, lastSeen: Date.now(), card: data.card });
           channels.get('default')!.members.add(data.agentId);
           scheduleSave();
           sendJson(200, { ok: true });

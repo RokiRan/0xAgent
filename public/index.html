@@ -1146,6 +1146,19 @@
       }
     }
 
+    // 成员能力档案缓存（agent/cards RPC；选择房间时刷新）
+    let agentSummaries = {};
+    async function refreshAgentCards() {
+      try {
+        const res = await rpc('agent/cards', {});
+        agentSummaries = {};
+        for (const s of res.result?.summaries ?? []) {
+          const sep = s.indexOf(': ');
+          if (sep > 0) agentSummaries[s.slice(0, sep)] = s.slice(sep + 2);
+        }
+      } catch { /* registry 不可达时保留旧快照 */ }
+    }
+
     async function selectRoom(name) {
       currentRoom = name;
       currentThreadId = null;
@@ -1153,6 +1166,7 @@
       updateComposerState();
       renderThreadList();
       renderRoomList();
+      await refreshAgentCards();
 
       const room = roomList.find(r => r.name === name);
       const chips = document.getElementById('memberChips');
@@ -1161,6 +1175,7 @@
         const chip = document.createElement('span');
         chip.className = `member-chip ${m.includes('gateway') ? '' : 'agent'}`;
         chip.textContent = m;
+        chip.title = agentSummaries[m] ?? (m.includes('gateway') ? '网关' : '能力未上报（旧代码）');
         chips.appendChild(chip);
       }
 
@@ -1255,7 +1270,10 @@
       if (!currentRoom || document.getElementById('taskPanel').classList.contains('hidden')) return;
       const ownerSel = document.getElementById('taskOwner');
       ownerSel.innerHTML = '<option value="">（暂不指派）</option>' +
-        roomAgents().map(a => `<option value="${a}">${a}</option>`).join('');
+        roomAgents().map(a => {
+          const s = agentSummaries[a];
+          return `<option value="${a}" title="${s ?? '能力未上报'}">${a}${s ? `（${s.length > 46 ? s.slice(0, 46) + '…' : s}）` : ''}</option>`;
+        }).join('');
       const res = await rpc('task/list', { room: currentRoom });
       const tasks = res.result?.tasks ?? [];
       const list = document.getElementById('taskList');

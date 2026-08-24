@@ -54,6 +54,12 @@ export interface BusGatewayConfig {
    * of agent context so vetted knowledge actually reaches agents.
    */
   loadPrinciples?: (room: string) => string[];
+  /**
+   * 团队成员能力速览（agent-card）：返回每个 agent 的一行摘要，
+   * 注入房间上下文头部——主脑派活时"看得见"队友的 OS/引擎/特殊能力。
+   * 60s 缓存刷新；未配置 = 不注入。
+   */
+  loadAgentCards?: () => Promise<string[]>;
   /** @mention request timeout (ms). Default 90000; tests set it short. */
   requestTimeoutMs?: number;
   /**
@@ -75,6 +81,9 @@ export class BusGateway {
   private loadPrinciples?: (room: string) => string[];
   private requestTimeoutMs: number;
   private contextTokens: number;
+  private loadAgentCards?: () => Promise<string[]>;
+  private rosterLines: string[] = [];
+  private rosterTimer?: ReturnType<typeof setInterval>;
   /** Focus-window digests: `${room}:${agentId}` → held messages (cap 50, oldest dropped). */
   private digests = new Map<string, RoomMessage[]>();
   private static readonly DIGEST_CAP = 50;
@@ -98,6 +107,7 @@ export class BusGateway {
     this.loadPrinciples = config.loadPrinciples;
     this.requestTimeoutMs = config.requestTimeoutMs ?? 90000;
     this.contextTokens = config.contextTokens ?? 3000;
+    this.loadAgentCards = config.loadAgentCards;
     this.transport = new HttpTransport({
       agentId: config.agentId,
       registryUrl: config.registryUrl,
@@ -138,9 +148,20 @@ export class BusGateway {
 
   async connect(): Promise<void> {
     await this.bus.connect();
+    if (this.loadAgentCards) {
+      const refresh = async () => {
+        try {
+          this.rosterLines = await this.loadAgentCards!();
+        } catch { /* 保留旧快照——registry 抖动不清空团队视图 */ }
+      };
+      await refresh();
+      this.rosterTimer = setInterval(refresh, 60_000);
+      this.rosterTimer.unref();
+    }
   }
 
   async disconnect(): Promise<void> {
+    clearInterval(this.rosterTimer);
     await this.bus.disconnect();
   }
 
@@ -219,6 +240,12 @@ export class BusGateway {
     const principles = this.loadPrinciples?.(room) ?? [];
     if (principles.length > 0) {
       const line = `【本房间已验证的原则，请遵守】${principles.join('；')}`;
+      lines.push(line);
+      used += line.length;
+    }
+    // 团队能力速览：主脑派活的事实源（agent-card，60s 快照）
+    if (this.rosterLines.length > 0) {
+      const line = `【团队成员能力】${this.rosterLines.join('；')}`;
       lines.push(line);
       used += line.length;
     }

@@ -18,6 +18,7 @@ import { LlmLedger } from './appserver/llm-ledger.js';
 import { ReminderBoard } from './appserver/reminders.js';
 import { RecordingProvider } from './plugins/model/recording.js';
 import { MiniMaxProvider } from './plugins/model/minimax.js';
+import { cardSummary, AgentCard } from './plugins/agent-bus/agent-card.js';
 import { createResponse, createError, createNotification, JsonRpcRequest } from './appserver/protocol.js';
 
 function loadEnvConfig(): Partial<HarnessV2Config> {
@@ -112,6 +113,16 @@ let busGateway: BusGateway | undefined;
 if (REGISTRY_URL && harness.server) {
   const appServer = harness.server;
 
+  // 能力档案：registry /agents → 紧凑摘要行（gateway 上下文注入 + agent/cards RPC 共用）
+  const fetchAgentCards = async (): Promise<AgentCard[]> => {
+    const res = await fetch(`${REGISTRY_URL}/agents`, {
+      headers: process.env.BUS_TOKEN ? { 'x-bus-token': process.env.BUS_TOKEN } : {},
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as { agents?: Array<{ card?: AgentCard }> };
+    return (data.agents ?? []).map((a) => a.card).filter((c): c is AgentCard => !!c);
+  };
+
   // chatDb + room_messages created above (before harness); reuse here.
   const insertMsg = chatDb.prepare('INSERT INTO room_messages (room, sender, kind, text, ts) VALUES (?, ?, ?, ?, ?)');
   const loadMsg = chatDb.prepare('SELECT room, sender, kind, text, ts FROM room_messages WHERE room = ? ORDER BY id DESC LIMIT ?');
@@ -134,6 +145,8 @@ if (REGISTRY_URL && harness.server) {
     isFocused: (agentId, room) => taskBoard.ownersInFocus(room).includes(agentId),
     // cumora §6.5 闭环: promoted principles reach agent context (same lazy closure).
     loadPrinciples: (room) => taskBoard.promotedPrinciples(room),
+    // 团队能力速览（主脑调度事实源）：成员卡片摘要注入房间上下文
+    loadAgentCards: async () => (await fetchAgentCards()).map(cardSummary),
     // future-you（cumora §9.2.1）: agent 经 bus request 排定时唤醒（lazy closure，同 isFocused）
     createReminder: (room, agentId, prompt, scheduledFor) => reminderBoard.create(room, agentId, prompt, scheduledFor),
     store: {
@@ -172,6 +185,16 @@ if (REGISTRY_URL && harness.server) {
     const text = param(req, 'text');
     if (!room || !text) return createError(req.id, -32602, 'Missing room or text');
     return createResponse(req.id, await busGateway!.sendChat(room, text));
+  });
+
+  // 成员能力档案（agent-card 自报）
+  appServer.registerMethod('agent/cards', async (req) => {
+    try {
+      const cards = await fetchAgentCards();
+      return createResponse(req.id, { cards, summaries: cards.map(cardSummary) });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
   });
 
   // Task board (Task/Contract + Lease)

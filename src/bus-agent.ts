@@ -18,6 +18,7 @@ import { MiniMaxProvider } from './plugins/model/minimax.js';
 import { RecordingProvider, httpLedgerSink } from './plugins/model/recording.js';
 import { createEngineFromEnv } from './plugins/engine/index.js';
 import { powerHostFromEnv, matchPowerIntent, powerExecute, PowerAction } from './plugins/power/index.js';
+import { collectAgentCard, AgentCard } from './plugins/agent-bus/agent-card.js';
 import type { ModelProvider } from './plugins/model/interface.js';
 
 const agentId = process.env.AGENT_ID ?? '';
@@ -48,6 +49,19 @@ if (coding.engine) console.log(`[${agentId}] coding engine: ${coding.engine.id} 
 // LLM 无法改目标；kind:'power' 走结构化通道，聊天走意图识别。
 const powerHost = powerHostFromEnv();
 if (powerHost) console.log(`[${agentId}] power control: ${powerHost.name} (${powerHost.ip})`);
+
+// 能力档案（主脑调度的事实源）：启动采集一次，10 分钟刷新；
+// 搭 /register 心跳进 registry，registry 重启后自愈。
+let agentCard: AgentCard | undefined;
+const refreshCard = async () => {
+  try {
+    agentCard = await collectAgentCard(agentId);
+  } catch (err) {
+    console.warn(`[${agentId}] card collect failed:`, err);
+  }
+};
+await refreshCard();
+setInterval(refreshCard, 10 * 60 * 1000).unref();
 
 let replyModel: ModelProvider | undefined;
 let taskModel: ModelProvider | undefined;
@@ -84,6 +98,7 @@ const transport = new HttpTransport({
   registryUrl,
   channel,
   registryToken: process.env.BUS_TOKEN || undefined,
+  card: () => agentCard,
 });
 const bus = new AgentBusImpl(agentId, transport);
 
