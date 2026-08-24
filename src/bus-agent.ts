@@ -52,10 +52,11 @@ if (powerHost) console.log(`[${agentId}] power control: ${powerHost.name} (${pow
 
 // 能力档案（主脑调度的事实源）：启动采集一次，10 分钟刷新；
 // 搭 /register 心跳进 registry，registry 重启后自愈。
+// 能力是变量：GPU/工具/本地服务全部探针实测，电源控制随配置派生。
 let agentCard: AgentCard | undefined;
 const refreshCard = async () => {
   try {
-    agentCard = await collectAgentCard(agentId);
+    agentCard = await collectAgentCard(agentId, process.env, { powerTarget: powerHost?.name });
   } catch (err) {
     console.warn(`[${agentId}] card collect failed:`, err);
   }
