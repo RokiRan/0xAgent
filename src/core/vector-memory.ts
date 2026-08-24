@@ -75,13 +75,17 @@ export class VectorMemory {
     return doc;
   }
 
-  search(query: string, topK = 5): MemorySearchResult[] {
+  // filter applies BEFORE the topK slice — slicing first would let
+  // out-of-scope docs evict in-scope ones from the candidate window
+  search(query: string, topK = 5, filter?: (doc: MemoryDocument) => boolean): MemorySearchResult[] {
     const queryEmbedding = this.embedder.embed(query);
 
-    const scored = this.documents.map(doc => ({
-      document: doc,
-      score: this.cosineSimilarity(queryEmbedding, doc.embedding),
-    }));
+    const scored = this.documents
+      .filter((doc) => (filter ? filter(doc) : true))
+      .map(doc => ({
+        document: doc,
+        score: this.cosineSimilarity(queryEmbedding, doc.embedding),
+      }));
 
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, topK).filter(s => s.score > 0.1);
@@ -169,7 +173,8 @@ export class ThreadMemory {
   }
 
   // Search indexed threads; pass threadId to isolate to one conversation
-  // (default is unfiltered for explicit memory/search tooling)
+  // (default is unfiltered for explicit memory/search tooling).
+  // Filter runs before the topK slice inside VectorMemory — no over-fetch heuristic.
   search(query: string, topK = 5, threadId?: string): Array<{
     content: string;
     score: number;
@@ -177,12 +182,12 @@ export class ThreadMemory {
     turnId: string;
     role?: string;
   }> {
-    // Over-fetch when filtering so post-filter still yields topK candidates
-    const results = this.vectorMemory.search(query, threadId ? topK * 4 : topK);
-    const filtered = threadId
-      ? results.filter((r) => String(r.document.metadata?.threadId ?? '') === threadId)
-      : results;
-    return filtered.slice(0, topK).map(r => ({
+    const results = this.vectorMemory.search(
+      query,
+      topK,
+      threadId ? (doc) => String(doc.metadata?.threadId ?? '') === threadId : undefined
+    );
+    return results.map(r => ({
       content: r.document.content,
       score: r.score,
       threadId: String(r.document.metadata?.threadId ?? ''),

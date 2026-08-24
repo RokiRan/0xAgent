@@ -18,9 +18,10 @@
     "registry": "tsx src/registry-server.ts",
     "start": "node dist/cli.js",
     "start:v2": "node dist/cli-v2.js",
-    "test": "node dist/test-pro.js",
+    "test": "sh scripts/test.sh",
     "demo:multi-agent": "node dist/demo-multi-agent.js",
-    "demo:http": "node dist/test-http-transport.js"
+    "demo:http": "node dist/test-http-transport.js",
+    "test:legacy": "node dist/test-pro.js"
   },
   "keywords": [
     "agent",
@@ -42,7 +43,7 @@
     "url": ""
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

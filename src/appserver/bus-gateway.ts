@@ -54,6 +54,8 @@ export interface BusGatewayConfig {
    * of agent context so vetted knowledge actually reaches agents.
    */
   loadPrinciples?: (room: string) => string[];
+  /** @mention request timeout (ms). Default 90000; tests set it short. */
+  requestTimeoutMs?: number;
 }
 
 export class BusGateway {
@@ -66,6 +68,7 @@ export class BusGateway {
   private store?: RoomStore;
   private isFocused?: (agentId: string, room: string) => boolean;
   private loadPrinciples?: (room: string) => string[];
+  private requestTimeoutMs: number;
   private contextTokens: number;
   /** Focus-window digests: `${room}:${agentId}` → held messages (cap 50, oldest dropped). */
   private digests = new Map<string, RoomMessage[]>();
@@ -88,6 +91,7 @@ export class BusGateway {
     this.store = config.store;
     this.isFocused = config.isFocused;
     this.loadPrinciples = config.loadPrinciples;
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 90000;
     this.contextTokens = config.contextTokens ?? 3000;
     this.transport = new HttpTransport({
       agentId: config.agentId,
@@ -294,7 +298,7 @@ export class BusGateway {
     const targets = candidates.filter((m) => mentions.includes(m));
     for (const target of targets) {
       this.bus
-        .request(target, { kind: 'chat', room, from: this.userName, human: true, text, context }, 90000)
+        .request(target, { kind: 'chat', room, from: this.userName, human: true, text, context }, this.requestTimeoutMs)
         .then((res) => {
           this.emit({
             room,

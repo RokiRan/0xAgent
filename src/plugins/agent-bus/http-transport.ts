@@ -102,7 +102,13 @@ export class HttpTransport implements Transport {
     }
 
     return new Promise((resolve) => {
-      this.server?.close(() => resolve());
+      // Never connected → no server; resolve instead of waiting on a
+      // callback that would never fire (disconnect-before-connect hang).
+      if (!this.server) {
+        resolve();
+        return;
+      }
+      this.server.close(() => resolve());
     });
   }
 
