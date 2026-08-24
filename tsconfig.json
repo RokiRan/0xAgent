@@ -12,5 +12,7 @@
     "resolveJsonModule": true,
     "declaration": true
   },
-  "include": ["src/**/*", "test/**/*"]
+  "include": [
+    "src/**/*"
+  ]
 }

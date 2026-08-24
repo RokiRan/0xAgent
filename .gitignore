@@ -47,3 +47,7 @@ coverage/
 temp/
 tmp/
 *.tmp
+
+# Test build artifacts (tsc emit)
+test/*.js
+test/*.d.ts

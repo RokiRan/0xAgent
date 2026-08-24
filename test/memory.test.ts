@@ -6,10 +6,9 @@ import type { Thread, Item } from '../src/core/thread.js';
 
 const mkThread = (id: string, content: string): Thread => ({
   id,
-  title: id,
+  archived: false,
   createdAt: 0,
   updatedAt: 0,
-  status: 'active',
   turns: [
     {
       id: `${id}-turn`,

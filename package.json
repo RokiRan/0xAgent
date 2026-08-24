@@ -21,7 +21,8 @@
     "test": "sh scripts/test.sh",
     "demo:multi-agent": "node dist/demo-multi-agent.js",
     "demo:http": "node dist/test-http-transport.js",
-    "test:legacy": "node dist/test-pro.js"
+    "test:legacy": "node dist/test-pro.js",
+    "typecheck": "tsc && tsc -p test/tsconfig.json"
   },
   "keywords": [
     "agent",

@@ -2,6 +2,7 @@
 // Runner: npx tsx --test test/   (node:test, zero extra deps)
 
 import Database from 'better-sqlite3';
+import type { Database as SqliteDb } from 'better-sqlite3';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRegistryServer } from '../src/plugins/agent-bus/http-transport.js';
@@ -55,7 +56,7 @@ export async function joinChannel(url: string, channel: string, agentId: string)
   }
 }
 
-export function makeDb(): Database {
+export function makeDb(): SqliteDb {
   const db = new Database(':memory:');
   db.pragma('journal_mode = WAL');
   return db;

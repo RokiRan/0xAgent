@@ -239,7 +239,6 @@ test('timebox 升级: 短 timebox + requestAgent 永不返回有效票 → sweep
   const got = board.list(ROOM).find((x) => x.id === d.id)!;
   assert.equal(got.state, 'escalated');
   assert.ok(got.escalatedAt !== null);
-  assert.equal(got.metrics?.decided ?? board.metrics.decided, board.metrics.decided);
   assert.equal(board.metrics.escalated, 1);
   board.stop();
 });
