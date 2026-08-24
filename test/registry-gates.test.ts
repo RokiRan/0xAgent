@@ -944,3 +944,25 @@ test('metrics: 每次 HELD 事件递增对应 held.<reason> 计数', async () =>
     await reg.close();
   }
 });
+
+test('BUS_TOKEN 鉴权 + 注册失败响亮退出（可观测性契约）', async () => {
+  // 带 token 的 registry：无 token 的 transport connect() 必须抛错
+  // （修复前：401 被静默吞掉，agent 日志照常打 "joined channel" 僵尸在线）
+  const { createRegistryServer } = await import('../src/plugins/agent-bus/http-transport.js');
+  const { HttpTransport } = await import('../src/plugins/agent-bus/http-transport.js');
+  const server = createRegistryServer(0, { token: 'secret-token' });
+  await new Promise<void>((r) => server.once('listening', r));
+  const port = (server.address() as { port: number }).port;
+  const url = `http://127.0.0.1:${port}`;
+
+  const noToken = new HttpTransport({ agentId: 'bad-agent', registryUrl: url });
+  await assert.rejects(noToken.connect(), /401|Unauthorized/i, '无 token 必须 connect 失败');
+  await noToken.disconnect();
+
+  const withToken = new HttpTransport({ agentId: 'good-agent', registryUrl: url, registryToken: 'secret-token' });
+  await withToken.connect();
+  const agents = (await (await fetch(`${url}/agents`, { headers: { 'x-bus-token': 'secret-token' } })).json()) as { agents: Array<{ agentId: string }> };
+  assert.ok(agents.agents.some((a) => a.agentId === 'good-agent'), '带 token 注册成功');
+  await withToken.disconnect();
+  server.close();
+});

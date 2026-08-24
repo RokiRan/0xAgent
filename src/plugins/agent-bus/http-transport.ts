@@ -77,8 +77,11 @@ export class HttpTransport implements Transport {
 
     // Register with registry if configured (also ensures home + extra channels, self-healing)
     if (this.registryUrl) {
-      await this.registerWithRegistry();
-      this.heartbeatInterval = setInterval(() => this.registerWithRegistry(), 30000);
+      await this.registerWithRegistry(true); // 初次失败直接抛错，拒绝僵尸在线
+      this.heartbeatInterval = setInterval(() => {
+        this.registerWithRegistry().catch((err) =>
+          console.error(`[AgentBus] heartbeat error: ${String(err).slice(0, 120)}`));
+      }, 30000);
       // Start polling for relayed messages
       this.pollInterval = setInterval(() => this.pollMessages(), 2000);
     }
@@ -284,21 +287,34 @@ export class HttpTransport implements Transport {
     });
   }
 
-  private async registerWithRegistry(): Promise<void> {
+  /**
+   * Initial register must fail loudly (bad token / unreachable registry =
+   * agent zombie-onlined). Heartbeats stay fault-tolerant — one transient
+   * failure shouldn't kill a healthy agent.
+   */
+  private async registerWithRegistry(initial = false): Promise<void> {
     if (!this.registryUrl) return;
-    await this.postJson(`${this.registryUrl}/register`, {
+    const attempt = async (path: string, body: unknown) => {
+      try {
+        await this.postJson(`${this.registryUrl}${path}`, body);
+      } catch (err) {
+        if (initial) throw new Error(`Registry ${path} failed: ${String(err)}`);
+        console.error(`[AgentBus] heartbeat ${path} failed: ${String(err).slice(0, 120)}`);
+      }
+    };
+    await attempt('/register', {
       agentId: this.agentId,
       url: `http://${this.host}:${this.port}`,
       card: this.cardProvider?.(),
-    }).catch(() => {});
+    });
     // Self-heal: re-ensure home + extra channels on every heartbeat.
     // Registry is in-memory; if it restarted, channels vanish and this rebuilds them.
-    await this.postJson(`${this.registryUrl}/channels/create`, {
+    await attempt('/channels/create', {
       channel: this.channel,
       agentId: this.agentId,
-    }).catch(() => {});
+    });
     for (const ch of this.extraChannels) {
-      await this.postJson(`${this.registryUrl}/channels/join`, { channel: ch, agentId: this.agentId }).catch(() => {});
+      await attempt('/channels/join', { channel: ch, agentId: this.agentId });
     }
   }
 
