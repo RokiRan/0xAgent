@@ -155,3 +155,247 @@ test('房间历史惰性加载: 首次访问是 emit 也能恢复持久化历史
   assert.equal(history[1].text, '重启后的第一条', '新消息在后');
   await gw.disconnect();
 });
+
+test('presence: startPresence 定时器存在；未 connect 时不崩溃；defensive dispose', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  // 不 connect — startPresence 自身 lazy 触发第一次 tick，第一次 tick 内 fetchAgents
+  // 会失败但不应抛给调用方。后续 timer 也无副作用。
+  const gw = new BusGateway({ agentId: 'web-gateway', registryUrl: reg.url, channels: ['test-room'] });
+  gw.startPresence({ intervalMs: 60_000 });
+  // 此时立刻 stop——不应抛。
+  await gw.disconnect();
+  // 二次 disconnect：clearInterval(undefined) 必须 no-op。
+  await gw.disconnect();
+});
+
+test('presence: getPresence 仅报新鲜 agent 在线；缺成员过滤；变化才通知', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await gw_createChannel(reg.url, 'test-room');
+  // agent-fresh 注册了（lastSeen=now） → 应在线
+  await joinChannel(reg.url, 'test-room', 'agent-fresh');
+  // agent-stale 仅加入渠道未注册 → /agents 不含 → 不在线
+  await postJson(reg.url, '/channels/join', { channel: 'test-room', agentId: 'agent-stale' });
+  // 让注册时间稍早，确保 ONLINE_WINDOW_MS (60s) 边界外——伪造一个旧 lastSeen:
+  // 通过注册后立即调用 /poll 拿到的 lastSeen 是 now；这里改用「不注册」模型更稳。
+
+  const gw = new BusGateway({ agentId: 'web-gateway', registryUrl: reg.url, channels: ['test-room'] });
+  // 不调 connect——presence 完全靠 fetchAgents+listMembers，无需 bus。
+
+  // ① 单点查询 getPresence：online 只含已注册 agent（注册即新鲜）；
+  // agent-stale 仅加入渠道未注册 → /agents 不含 → 不在线
+  const snap = await gw.getPresence('test-room');
+  assert.equal(snap.room, 'test-room');
+  assert.deepEqual(snap.members.sort(), ['agent-fresh', 'agent-stale', 'web-gateway']);
+  assert.deepEqual(snap.online, ['agent-fresh'], '仅注册的 agent-fresh 在线');
+
+  // ② startPresence 后第一次 tick 必须触发 listener（成员集首次入缓存）
+  const events: Array<{ members: string[]; online: string[] }> = [];
+  gw.onPresence((p) => events.push({ members: [...p.members], online: [...p.online] }));
+  gw.startPresence({ intervalMs: 60_000 });
+  // 等一拍微任务让暖场 fetch 落地
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await waitFor(() => events.length >= 1, 2000);
+  assert.equal(events.length, 1, '首次 tick 必发一次（首次入缓存）');
+  assert.deepEqual(events[0].online, ['agent-fresh']);
+
+
+  // ③ 触发第二次 tick——状态未变，不应再发
+  await gw.presenceTick();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(events.length, 1, '同状态第二次 tick 不重复通知');
+  // ④ 状态变化：注册 agent-stale（lastSeen=now），再次 tick → 应再发一次且 online 含三者
+  await joinChannel(reg.url, 'test-room', 'agent-stale'); // 注册+加入（joinChannel 已含 register）
+  await gw.presenceTick();
+  await waitFor(() => events.length >= 2, 2000);
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[1].online.sort(), ['agent-fresh', 'agent-stale'], '注册 agent-stale 后加入 online');
+
+
+  // ⑤ disconnect 清 timer + 清缓存；再次 presenceTick 必须重置首帧
+  await gw.disconnect();
+  await gw.presenceTick();
+  await waitFor(() => events.length >= 3, 2000);
+  assert.equal(events.length, 3, 'disconnect 后首帧必通知');
+});
+
+test('presence: getAgentLastSeen 缓存最近一次 sweep 值；未知 agent 返回 null', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-x');
+  const gw = new BusGateway({ agentId: 'web-gateway', registryUrl: reg.url, channels: ['test-room'] });
+  // 未启动 presence 之前：缓存空
+  assert.equal(gw.getAgentLastSeen('agent-x'), null, '未 sweep 时 null');
+  gw.startPresence({ intervalMs: 60_000 });
+  await gw.presenceTick();
+  const ts = gw.getAgentLastSeen('agent-x');
+  assert.ok(typeof ts === 'number' && ts > 0, 'sweep 后返回 epoch ms');
+  assert.equal(gw.getAgentLastSeen('not-registered'), null);
+  await gw.disconnect();
+});
+
+async function gw_createChannel(url: string, name: string): Promise<void> {
+  const res = await postJson(url, '/channels/create', { channel: name, agentId: 'web-gateway' });
+  if (res.status !== 200) throw new Error(`create channel failed: ${res.status}`);
+}
+
+// ── Config fanout (settings UI, contract §3) ──
+// 策略：monkey-patch gateway.bus.request 用异步表查 payload.kind/action；
+// 无须搭假 agent 服务端。覆盖：解析、超时、错回复、空房间、set 路径、自身配置读写。
+
+// 单成员拉取合法 config；reply 形状错配时 config=null 但 transport 正常
+test('getAgentConfigs: 单 agent 合法回复 + 形状错配均不回 throw', async (t) => {
+  const { gateway, reg } = await makeGateway();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-x');
+
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  const original = gw.bus.request.bind(gw.bus);
+
+  gw.bus.request = async (to, payload) => {
+    if (isConfigGet(payload)) {
+      return { kind: 'config', agent: to, host: 'h1', persona: '擅长 A', model: 'big', modelSmall: 'small', channel: 'team' };
+    }
+    return original(to, payload);
+  };
+  const rows = await gateway.getAgentConfigs('test-room');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].agentId, 'agent-x');
+  assert.equal(rows[0].error, null);
+  assert.equal(rows[0].online, false, '无 presence sweep → 全离线');
+  if (!rows[0].config) throw new Error('config 应被填充');
+  assert.deepEqual(rows[0].config, {
+    kind: 'config', agent: 'agent-x', host: 'h1', persona: '擅长 A', model: 'big', modelSmall: 'small', channel: 'team',
+  });
+
+  gw.bus.request = async (to, payload) => {
+    if (isConfigGet(payload)) return { wrong: 'shape' };
+    return original(to, payload);
+  };
+  const rows2 = await gateway.getAgentConfigs('test-room');
+  assert.equal(rows2[0].error, null, '解析失败不算 transport error');
+  await gateway.disconnect();
+});
+
+// 慢 agent 超时单独落 error；快 agent 不被拖垮。Real timer here is intentional — the timeout
+// itself is what's under test.（契约 §3 的 10s 缩到 200ms：测的是「逐成员独立 + 不拖垮」语义。）
+test('getAgentConfigs: 单 agent 超时 → 该行 error；其他成员不受影响', async (t) => {
+  // （契约 §3 的 10s 缩到 200ms：测的是「逐成员独立 + 不拖垮」语义，不是时间精度。）
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'slow-agent');
+  await joinChannel(reg.url, 'test-room', 'fast-agent');
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 200,
+    store: { insert: () => {}, load: () => [] },
+  });
+  await gateway.createRoom('test-room');
+
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  const original = gw.bus.request.bind(gw.bus);
+  gw.bus.request = (to, payload) => {
+    if (to === 'slow-agent' && isConfigGet(payload)) {
+      return new Promise((_, reject) => setTimeout(() => reject(new Error('timeout after 200ms')), 210));
+    }
+    if (isConfigGet(payload)) {
+      return Promise.resolve({ kind: 'config', agent: to, host: 'h', persona: '', model: 'm', modelSmall: 's', channel: 'c' });
+    }
+    return original(to, payload);
+  };
+
+  const rows = await gateway.getAgentConfigs('test-room');
+  const slow = rows.find((r) => r.agentId === 'slow-agent');
+  const fast = rows.find((r) => r.agentId === 'fast-agent');
+  if (!slow || !fast) throw new Error('expected both rows');
+  assert.ok(/timeout/.test(slow.error ?? ''), 'slow 落 error');
+  assert.equal(slow.config, null);
+  assert.equal(slow.online, false);
+  assert.ok(fast.config && fast.error === null, 'fast 不受 slow 影响');
+  await gateway.disconnect();
+});
+
+
+// 空房间（含 self 之外 0 成员）→ 空数组，不发任何 request
+test('getAgentConfigs: 房间无其他成员 → 空数组', async (t) => {
+  const { gateway, reg } = await makeGateway();
+  t.after(() => reg.close());
+  let calls = 0;
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  const original = gw.bus.request.bind(gw.bus);
+  gw.bus.request = (to, payload) => { calls++; return original(to, payload); };
+
+  const rows = await gateway.getAgentConfigs('test-room');
+  assert.deepEqual(rows, []);
+  assert.equal(calls, 0, '无成员时不发任何 request');
+  await gateway.disconnect();
+});
+
+// set 路径覆盖：ok:true / ok:false / 错回复 三种走线
+test('setAgentConfig: ok:true / ok:false / 错回复都映射到 {ok,error}', async (t) => {
+  const { gateway, reg } = await makeGateway();
+  t.after(() => reg.close());
+
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  let lastPatch: unknown;
+  gw.bus.request = async (to, payload) => {
+    if (isConfigSet(payload)) {
+      lastPatch = (payload as { patch: unknown }).patch;
+      if (to === 'good') return { kind: 'config', ok: true, agent: 'good' };
+      if (to === 'bad') return { kind: 'config', ok: false, error: 'validation failed' };
+      return { wrong: 'shape' };
+    }
+    return null;
+  };
+
+  const ok = await gateway.setAgentConfig('good', { persona: 'X', modelSmall: 'Y' });
+  assert.deepEqual(ok, { ok: true, agent: 'good' });
+  assert.deepEqual(lastPatch, { persona: 'X', modelSmall: 'Y' }, 'patch 原样转发');
+
+  const bad = await gateway.setAgentConfig('bad', { persona: 'X' });
+  assert.deepEqual(bad, { ok: false, error: 'validation failed' });
+
+  const malformed = await gateway.setAgentConfig('weird', {});
+  assert.deepEqual(malformed, { ok: false, error: 'invalid reply' }, '非合同回复 → invalid reply');
+  await gateway.disconnect();
+});
+
+// gateway 自身配置读写 + 边界裁剪
+test('gateway 自身配置: get 反映初值；apply 热更新并裁剪 contextTokens / userName', async (t) => {
+  const { gateway, reg } = await makeGateway();
+  t.after(() => reg.close());
+
+  // makeGateway 的 contextTokens 默认 3000；未传 userName → 'web-user'
+  const init = gateway.getGatewayConfig();
+  assert.equal(init.userName, 'web-user');
+  assert.equal(init.contextTokens, 3000);
+
+  gateway.applyGatewayConfig({ userName: 'alice', contextTokens: 5000 });
+  assert.deepEqual(gateway.getGatewayConfig(), { userName: 'alice', contextTokens: 5000 });
+
+  // 边界裁剪：超 20000 → 截到 20000；低于 500 → 抬到 500。
+  gateway.applyGatewayConfig({ contextTokens: 99_999 });
+  assert.equal(gateway.getGatewayConfig().contextTokens, 20_000);
+  gateway.applyGatewayConfig({ contextTokens: 10 });
+  assert.equal(gateway.getGatewayConfig().contextTokens, 500);
+
+  // 过长 userName 不被采纳（保持 alice）
+  gateway.applyGatewayConfig({ userName: 'x'.repeat(100) });
+  assert.equal(gateway.getGatewayConfig().userName, 'alice');
+
+  // 非数字 contextTokens 跳过
+  gateway.applyGatewayConfig({ contextTokens: 'oops' as unknown as number });
+  assert.equal(gateway.getGatewayConfig().contextTokens, 500);
+  await gateway.disconnect();
+});
+
+function isConfigGet(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  return (payload as { kind?: unknown }).kind === 'config' && (payload as { action?: unknown }).action === 'get';
+}
+
+function isConfigSet(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  return (payload as { kind?: unknown }).kind === 'config' && (payload as { action?: unknown }).action === 'set';
+}
+

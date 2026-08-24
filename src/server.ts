@@ -67,6 +67,11 @@ chatDb.exec(`CREATE TABLE IF NOT EXISTS room_messages (
   ts INTEGER NOT NULL
 )`);
 chatDb.exec('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room, id)');
+// 设置持久化（contract §3）：key/value 表，启动时读出 userName/contextTokens 注入 gateway。
+chatDb.exec(`CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)`);
 const llmLedger = new LlmLedger(chatDb);
 
 const harness = new HarnessV2({
@@ -130,17 +135,31 @@ if (REGISTRY_URL && harness.server) {
   // Row shape returned by better-sqlite3 .all(); boundary cast, column names are authoritative
   interface MsgRow { room: string; sender: string; kind: RoomMessage['kind']; text: string; ts: number }
 
+  // 设置持久化：启动时读 settings 表，env 仅作 fallback（DB 优先；写操作热生效）。
+  const loadSetting = (key: string): string | undefined => {
+    const row = chatDb.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value;
+  };
+  const saveSetting = chatDb.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+  );
+  const storedUserName = loadSetting('userName');
+  const storedContextTokens = loadSetting('contextTokens');
+  const parsedContextTokens = storedContextTokens !== undefined ? Number(storedContextTokens) : NaN;
+
   busGateway = new BusGateway({
     agentId: process.env.BUS_AGENT_ID ?? 'web-gateway',
     registryUrl: REGISTRY_URL,
     registryToken: process.env.BUS_TOKEN || undefined,
-    userName: process.env.BUS_USER_NAME ?? 'me',
+    // 持久化设置优先，env 仅在 DB 无值时作 fallback——保证 UI 改过的值重启后还在。
+    userName: storedUserName ?? process.env.BUS_USER_NAME ?? 'me',
     // REGRESSION GUARD (docs/COORDINATION.md#2): channels 必须传进 transport
     // （heartbeat 每次重 join）。曾经漏传 → registry 重启后 gateway 丢成员籍，
     // 所有 agent 回复 403 静默消失。删这行 = 复现该事故。
     channels: (process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean),
-    contextTokens: Number(process.env.BUS_CONTEXT_TOKENS) || 3000,
-    // cumora §6.6 focus window: probe TaskBoard for active leases.
+    contextTokens: Number.isFinite(parsedContextTokens) && parsedContextTokens > 0
+      ? parsedContextTokens
+      : Number(process.env.BUS_CONTEXT_TOKENS) || 3000,
     // Lazy closure — taskBoard is constructed below but only called at chat time.
     isFocused: (agentId, room) => taskBoard.ownersInFocus(room).includes(agentId),
     // cumora §6.5 闭环: promoted principles reach agent context (same lazy closure).
@@ -161,7 +180,23 @@ if (REGISTRY_URL && harness.server) {
   busGateway.onRoomMessage((msg) => {
     appServer.broadcast(createNotification('room/message', msg));
   });
+  // Presence (cumora §X.1): poll registry, broadcast room/presence on flips.
+  busGateway.onPresence((presence) => {
+    appServer.broadcast(createNotification('room/presence', presence));
+  });
+  busGateway.startPresence();
 
+
+  appServer.registerMethod('room/presence/get', async (req) => {
+    const room = param(req, 'room');
+    if (!room) return createError(req.id, -32602, 'Missing room');
+    try {
+      const p = await busGateway!.getPresence(room);
+      return createResponse(req.id, { members: p.members, online: p.online });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
   const param = (req: JsonRpcRequest, key: string) => {
     const p = req.params as Record<string, unknown> | undefined;
     const v = p?.[key];
@@ -472,6 +507,63 @@ if (REGISTRY_URL && harness.server) {
     const room = param(req, 'room');
     if (!room) return createError(req.id, -32602, 'Missing room');
     return createResponse(req.id, { principles: taskBoard.listPrinciples(room) });
+  });
+
+  // Settings UI — agent fanout (contract §3): 列房间内每个成员的 config + 在线点。
+  appServer.registerMethod('agent/config/getAll', async (req) => {
+    const room = param(req, 'room');
+    if (!room) return createError(req.id, -32602, 'Missing room');
+    try {
+      const agents = await busGateway!.getAgentConfigs(room);
+      return createResponse(req.id, { agents });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+
+  // Settings UI — 单 agent 配置热更新（contract §3）。仅 persona/modelSmall 可改。
+  appServer.registerMethod('agent/config/set', async (req) => {
+    const room = param(req, 'room');
+    const target = param(req, 'target');
+    const p = req.params as Record<string, unknown> | undefined;
+    const patch = (p?.patch ?? {}) as { persona?: unknown; modelSmall?: unknown };
+    if (!room || !target) return createError(req.id, -32602, 'Missing room or target');
+    try {
+      const result = await busGateway!.setAgentConfig(target, {
+        persona: typeof patch.persona === 'string' ? patch.persona : undefined,
+        modelSmall: typeof patch.modelSmall === 'string' ? patch.modelSmall : undefined,
+      });
+      if (!result.ok) return createResponse(req.id, { ok: false, error: result.error ?? 'unknown' });
+      return createResponse(req.id, { ok: true, agent: result.agent ?? target });
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+  });
+
+  // Settings UI — gateway 自身配置读取（contract §3）。
+  appServer.registerMethod('gateway/config/get', (req) => {
+    return createResponse(req.id, busGateway!.getGatewayConfig());
+  });
+
+  // Settings UI — gateway 自身配置写入（contract §3）：写 settings 表 + 热更新内存字段。
+  appServer.registerMethod('gateway/config/set', (req) => {
+    const p = req.params as Record<string, unknown> | undefined;
+    const patch = (p ?? {}) as { userName?: unknown; contextTokens?: unknown };
+    // 先做类型校验，免得半成品写进 DB。
+    if ('userName' in patch && (typeof patch.userName !== 'string' || patch.userName.length === 0 || patch.userName.length > 64)) {
+      return createError(req.id, -32602, 'userName must be a non-empty string ≤ 64 chars');
+    }
+    if ('contextTokens' in patch && (typeof patch.contextTokens !== 'number' || !Number.isFinite(patch.contextTokens))) {
+      return createError(req.id, -32602, 'contextTokens must be a finite number');
+    }
+    try {
+      if (typeof patch.userName === 'string') saveSetting.run('userName', patch.userName);
+      if (typeof patch.contextTokens === 'number') saveSetting.run('contextTokens', String(patch.contextTokens));
+    } catch (err) {
+      return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
+    }
+    busGateway!.applyGatewayConfig(patch);
+    return createResponse(req.id, { ok: true });
   });
 
   // Metrics: local board counters + remote registry gate counters

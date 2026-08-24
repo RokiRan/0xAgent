@@ -25,6 +25,37 @@ export interface RoomStore {
   load(room: string, limit: number): RoomMessage[];
 }
 
+export interface RoomPresence {
+  room: string;
+  members: string[];
+  online: string[];
+}
+
+/** Single agent's config reply (matches bus-agent kind:'config' get). */
+export interface AgentConfigReply {
+  kind: 'config';
+  agent: string;
+  host: string;
+  persona: string;
+  model: string;
+  modelSmall: string;
+  channel: string;
+}
+
+/** Per-agent fanout result for `getAgentConfigs`. One row per member, errors stay local. */
+export interface AgentConfigEntry {
+  agentId: string;
+  online: boolean;
+  config: AgentConfigReply | null;
+  error: string | null;
+}
+
+/** Settings UI patch — only persona/modelSmall are hot-editable per contract §2. */
+export interface AgentConfigPatch {
+  persona?: string;
+  modelSmall?: string;
+}
+
 export interface BusGatewayConfig {
   agentId: string;
   registryUrl: string;
@@ -94,6 +125,24 @@ export class BusGateway {
   private loadedRooms = new Set<string>();
   private listeners = new Set<(msg: RoomMessage) => void>();
 
+  /** Last-seen threshold for "online": agents seen within this window are live. */
+  private static readonly ONLINE_WINDOW_MS = 60_000;
+
+  /** Presence subscriptions — fired on the polling loop when an agent's online status flips. */
+  private presenceListeners = new Set<(msg: RoomPresence) => void>();
+
+  /** Cached `members → online` snapshot per channel, used to detect flips. */
+  private presenceState = new Map<string, RoomPresence>();
+
+
+  /** Polling handle for the presence sweep. */
+  private presenceTimer?: ReturnType<typeof setInterval>;
+
+  /** Channels the presence loop is observing (defaults to config.channels). */
+  private presenceChannels: string[];
+
+  /** Most-recent lastSeen values from the registry, keyed by agentId. */
+  private agentsLastSeen = new Map<string, number>();
   private registryToken?: string;
 
   constructor(config: BusGatewayConfig) {
@@ -108,6 +157,9 @@ export class BusGateway {
     this.requestTimeoutMs = config.requestTimeoutMs ?? 90000;
     this.contextTokens = config.contextTokens ?? 3000;
     this.loadAgentCards = config.loadAgentCards;
+    // Presence loop defaults to whatever the gateway is joined to; callers can
+    // override via startPresence({ channels }).
+    this.presenceChannels = [...(config.channels ?? [])];
     this.transport = new HttpTransport({
       agentId: config.agentId,
       registryUrl: config.registryUrl,
@@ -162,6 +214,9 @@ export class BusGateway {
 
   async disconnect(): Promise<void> {
     clearInterval(this.rosterTimer);
+    clearInterval(this.presenceTimer);
+    this.presenceTimer = undefined;
+    this.presenceState.clear();
     await this.bus.disconnect();
   }
 
@@ -169,9 +224,140 @@ export class BusGateway {
     this.listeners.add(listener);
   }
 
+  onPresence(listener: (msg: RoomPresence) => void): void {
+    this.presenceListeners.add(listener);
+  }
+
+  /** 当前房间在线状态快照（无 listener 时也可单点调用，给 UI 即时取一次）。 */
+  async getPresence(room: string): Promise<RoomPresence> {
+    const [members, agents] = await Promise.all([
+      this.listMembers(room),
+      this.fetchAgents(),
+    ]);
+    const online = computeOnline(members, agents, BusGateway.ONLINE_WINDOW_MS);
+    return { room, members, online };
+  }
+
+  /**
+   * Start the presence sweep. Polls `{registryUrl}/agents` every `intervalMs`,
+   * recomputes (members, online) per channel, and emits a flip to listeners
+   * only when the pair changes (idempotent ticks are silent).
+   * Defensive: pre-connect calls are queued — first tick fires after connect.
+   */
+  startPresence(options: { intervalMs?: number; channels?: string[] } = {}): void {
+    if (options.channels) this.presenceChannels = [...options.channels];
+    const intervalMs = options.intervalMs ?? 15_000;
+    if (this.presenceTimer) clearInterval(this.presenceTimer);
+    this.presenceTimer = setInterval(() => {
+      this.presenceTick().catch((err) => {
+        console.error('[bus-gateway] presence tick failed:', err);
+      });
+    }, intervalMs);
+    this.presenceTimer.unref();
+    // Warm the cache eagerly so listeners see the first snapshot at t≈0
+    // (avoids the "all offline until first tick" UX gap).
+    void this.presenceTick().catch(() => { /* logged above */ });
+  }
+
+  /** Last seen timestamp (ms) for an agent from the most recent presence sweep, or null. */
+  getAgentLastSeen(agentId: string): number | null {
+    return this.agentsLastSeen.get(agentId) ?? null;
+  }
+
+  /** Force one presence sweep (used by tests / on-demand refresh). */
+  async presenceTick(): Promise<void> {
+    let agents: AgentDescriptor[];
+    try {
+      agents = await this.fetchAgents();
+    } catch {
+      // Registry blip → keep last known snapshot, don't clear (UX: all-greyout
+      // is worse than a stale-but-recent presence signal).
+      return;
+    }
+    this.agentsLastSeen.clear();
+    for (const a of agents) this.agentsLastSeen.set(a.agentId, a.lastSeen);
+    for (const room of this.presenceChannels) {
+      let members: string[];
+      try {
+        members = await this.listMembers(room);
+      } catch {
+        continue;
+      }
+      const online = computeOnline(members, agents, BusGateway.ONLINE_WINDOW_MS);
+      const prev = this.presenceState.get(room);
+      const next: RoomPresence = { room, members, online };
+      if (prev && presenceEqual(prev, next)) continue; // idempotent — no UI churn
+      this.presenceState.set(room, next);
+      for (const l of this.presenceListeners) l(next);
+    }
+  }
+
+  /** GET /agents — typed view of the registry roster. */
+  private async fetchAgents(): Promise<AgentDescriptor[]> {
+    const data = (await this.getJson(`${this.registryUrl}/agents`)) as { agents?: AgentDescriptor[] };
+    return data.agents ?? [];
+  }
+
   /** Direct bus request to an agent (used by TaskBoard for assign/rework). */
   async requestAgent(target: string, payload: unknown, timeoutMs = 90000): Promise<unknown> {
     return this.bus.request(target, payload, timeoutMs);
+  }
+
+  /**
+   * Fan out `kind:'config' action:'get'` to every room member (10s timeout per
+   * agent). One member failing does NOT poison the rest — the row carries
+   * `error` so the UI can still show other agents. Online status uses the
+   * cached lastSeen (PresenceAgent's same 60s window); null = unknown → offline.
+   * Self is excluded — gateway holds no config itself.
+   */
+  async getAgentConfigs(room: string): Promise<AgentConfigEntry[]> {
+    const members = await this.listMembers(room);
+    const targets = members.filter((m) => m !== this.agentId);
+    const rows: AgentConfigEntry[] = [];
+    for (const agentId of targets) {
+      const lastSeen = this.getAgentLastSeen(agentId);
+      const online = lastSeen !== null && Date.now() - lastSeen < BusGateway.ONLINE_WINDOW_MS;
+      let config: AgentConfigReply | null = null;
+      let error: string | null = null;
+      try {
+        const reply = (await this.bus.request(agentId, { kind: 'config', action: 'get' }, 10_000)) as unknown;
+        config = parseConfigReply(reply);
+      } catch (err) {
+        error = String(err instanceof Error ? err.message : err);
+      }
+      rows.push({ agentId, online, config, error });
+    }
+    return rows;
+  }
+
+  /**
+   * Send a config patch to a single agent (contract §2 set). Returns the
+   * parsed reply or throws on transport-level failure. Caller surfaces the
+   * agent's own `{ok:false, error}` via the returned `ok` flag.
+   */
+  async setAgentConfig(target: string, patch: AgentConfigPatch): Promise<{ ok: boolean; agent?: string; error?: string }> {
+    const reply = (await this.bus.request(target, { kind: 'config', action: 'set', patch }, 10_000)) as unknown;
+    return parseSetReply(reply);
+  }
+
+  /** Settings UI — gateway own userName (display name) and context token budget. */
+  getGatewayConfig(): { userName: string; contextTokens: number } {
+    return { userName: this.userName, contextTokens: this.contextTokens };
+  }
+
+  /**
+   * Hot-update gateway config. Empty patch = no-op. Only known fields apply
+   * (unknown keys ignored). contextTokens is clamped to [500, 20000] — values
+   * outside that range silently fall back to the closest bound to keep the
+   * context builder from looping on a degenerate budget.
+   */
+  applyGatewayConfig(patch: { userName?: unknown; contextTokens?: unknown }): void {
+    if (typeof patch.userName === 'string' && patch.userName.length > 0 && patch.userName.length <= 64) {
+      this.userName = patch.userName;
+    }
+    if (typeof patch.contextTokens === 'number' && Number.isFinite(patch.contextTokens)) {
+      this.contextTokens = Math.min(20_000, Math.max(500, Math.round(patch.contextTokens)));
+    }
   }
 
   /**
@@ -438,4 +624,65 @@ export class BusGateway {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }
+}
+
+/** Registry `/agents` row, narrowed to the fields presence cares about. */
+export interface AgentDescriptor {
+  agentId: string;
+  url: string;
+  lastSeen: number;
+  card?: unknown;
+}
+
+/** Online = members ∩ {agents with lastSeen within the window}. Stable order. */
+function computeOnline(members: string[], agents: AgentDescriptor[], windowMs: number): string[] {
+  const cutoff = Date.now() - windowMs;
+  const live = new Set<string>();
+  for (const a of agents) if (a.lastSeen >= cutoff) live.add(a.agentId);
+  return members.filter((m) => live.has(m));
+}
+
+/** Presence idempotency: skip emitting when members + online are both unchanged. */
+function presenceEqual(a: RoomPresence, b: RoomPresence): boolean {
+  if (a.room !== b.room) return false;
+  if (a.members.length !== b.members.length || b.members.length !== a.members.length) return false;
+  if (a.online.length !== b.online.length) return false;
+  return a.members.every((m, i) => m === b.members[i]) && a.online.every((m, i) => m === b.online[i]);
+}
+
+/**
+ * Narrow a raw bus reply to the contract §2 config-get shape. Returns null on
+ * any mismatch — the agent either returned the wrong payload, or its version
+ * is older than the contract. Caller decides whether null counts as error.
+ */
+function parseConfigReply(reply: unknown): AgentConfigReply | null {
+  if (!reply || typeof reply !== 'object') return null;
+  const r = reply as Record<string, unknown>;
+  if (r.kind !== 'config') return null;
+  if (typeof r.agent !== 'string') return null;
+  if (typeof r.host !== 'string') return null;
+  if (typeof r.persona !== 'string') return null;
+  if (typeof r.model !== 'string') return null;
+  if (typeof r.modelSmall !== 'string') return null;
+  if (typeof r.channel !== 'string') return null;
+  return {
+    kind: 'config',
+    agent: r.agent,
+    host: r.host,
+    persona: r.persona,
+    model: r.model,
+    modelSmall: r.modelSmall,
+    channel: r.channel,
+  };
+}
+
+/** Narrow a bus reply to the contract §2 config-set shape. Throws via `error` field for soft-fail. */
+function parseSetReply(reply: unknown): { ok: boolean; agent?: string; error?: string } {
+  if (!reply || typeof reply !== 'object') return { ok: false, error: 'invalid reply' };
+  const r = reply as Record<string, unknown>;
+  if (r.kind !== 'config') return { ok: false, error: 'invalid reply' };
+  if (r.ok === true) {
+    return { ok: true, agent: typeof r.agent === 'string' ? r.agent : undefined };
+  }
+  return { ok: false, error: typeof r.error === 'string' ? r.error : 'unknown error' };
 }

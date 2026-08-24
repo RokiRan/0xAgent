@@ -684,8 +684,121 @@
 
     .modal-actions .btn-approve { background: var(--success); color: #fff; }
     .modal-actions .btn-reject { background: var(--danger); color: #fff; }
+    /* Settings panel — 与 task-panel 互斥打开的右抽屉，复用 task-panel-header/room-add-btn 风格 */
+    .settings-panel {
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 320px;
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border);
+      z-index: 15;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+    .settings-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+    }
+    .settings-panel-actions { display: flex; gap: 6px; }
+    .settings-section {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .settings-section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .settings-hint {
+      font-size: 12px;
+      color: var(--text-secondary);
+      opacity: 0.7;
+    }
+    .settings-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .settings-row label {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+    .settings-row input,
+    .settings-row textarea {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 12px;
+      padding: 6px 10px;
+      font-family: inherit;
+      resize: vertical;
+    }
+    .settings-row textarea { min-height: 60px; }
+    .settings-actions-row { flex-direction: row; align-items: center; gap: 10px; }
+    .settings-actions-row button {
+      padding: 5px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border-radius: var(--radius);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .settings-actions-row button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .settings-actions-row button.saved {
+      border-color: var(--success);
+      color: var(--success);
+    }
+    .settings-status {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+    .settings-status.ok { color: var(--success); }
+    .settings-status.err { color: var(--danger); }
+    .settings-agent-card {
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg-tertiary);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .settings-agent-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .settings-agent-head .agent-id { font-weight: 600; }
+    .settings-agent-head .agent-host {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+    .settings-agent-card.is-offline { opacity: 0.55; }
+    .settings-agent-card.is-error { border-color: var(--danger); }
+    .settings-agent-card .error-msg {
+      font-size: 11px;
+      color: var(--danger);
+    }
 
-    .hidden { display: none !important; }
 
     /* Chat rooms */
     .room-section {
@@ -742,6 +855,29 @@
     }
 
     .member-chip.agent { color: var(--accent); border-color: var(--accent); }
+    .member-chip.offline { opacity: 0.5; }
+
+    /* Online status dot — 8px green pulse for live agents, 6px grey for offline.
+       Scoped under .member-chip so the settings-panel agent cards can opt in
+       by reusing the same .presence-dot class without colliding. */
+    .member-chip .presence-dot,
+    .presence-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-right: 5px;
+      vertical-align: middle;
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+    }
+    .presence-dot.offline {
+      width: 6px;
+      height: 6px;
+      background: var(--text-secondary);
+      box-shadow: none;
+      opacity: 0.6;
+    }
 
     .message.system .message-body { color: var(--warning); font-style: italic; }
 
@@ -839,6 +975,9 @@
         <div class="actions">
           <button id="tasksBtn" onclick="toggleTaskPanel()">任务</button>
           <button id="forkBtn" onclick="forkThread()">Fork</button>
+
+          <button id="settingsBtn" onclick="toggleSettingsPanel()" title="设置">⚙</button>
+
           <button id="archiveBtn" onclick="archiveThread()">Archive</button>
         </div>
       </div>
@@ -858,6 +997,35 @@
           <button onclick="createTask()">创建并指派</button>
         </div>
         <div class="task-list" id="taskList"></div>
+      </div>
+
+      <div class="settings-panel hidden" id="settingsPanel">
+        <div class="settings-panel-header">
+          <span>设置</span>
+          <span class="settings-panel-actions">
+            <button class="room-add-btn" onclick="toggleSettingsPanel()" title="关闭">✕</button>
+          </span>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">网关基础配置</div>
+          <div class="settings-row">
+            <label for="settingsUserName">用户名</label>
+            <input id="settingsUserName" placeholder="聊天消息发送者名称" />
+          </div>
+          <div class="settings-row">
+            <label for="settingsContextTokens">上下文预算 (tokens)</label>
+            <input id="settingsContextTokens" type="number" min="500" max="20000" step="100" />
+          </div>
+          <div class="settings-row settings-actions-row">
+            <button id="settingsGatewaySave" onclick="saveGatewayConfig()">保存</button>
+            <span id="settingsGatewayStatus" class="settings-status"></span>
+          </div>
+        </div>
+        <div class="settings-section">
+          <div class="settings-section-title">Agent 成员</div>
+          <div class="settings-hint" id="settingsAgentHint">请先进入一个聊天室</div>
+          <div id="settingsAgentList"></div>
+        </div>
       </div>
 
       <div class="messages" id="messages">
@@ -912,6 +1080,31 @@
     let lastActivityAt = null;
     const threads = new Map();
 
+    /** presenceByRoom: room → Set<agentId> currently online (live within 60s window). */
+    const presenceByRoom = new Map();
+    /** memberListByRoom: room → string[] (from room/list, drives the chip layout). */
+    const memberListByRoom = new Map();
+
+    /** Render the chip strip from cached members + online state. Idempotent. */
+    function renderMemberChips(room) {
+      const chips = document.getElementById('memberChips');
+      const members = memberListByRoom.get(room) ?? [];
+      const online = presenceByRoom.get(room) ?? new Set();
+      chips.innerHTML = '';
+      for (const m of members) {
+        const isOnline = online.has(m);
+        const chip = document.createElement('span');
+        chip.className = `member-chip ${m.includes('gateway') ? '' : 'agent'} ${isOnline ? '' : 'offline'}`.trim();
+        const dot = document.createElement('span');
+        dot.className = `presence-dot ${isOnline ? '' : 'offline'}`.trim();
+        chip.appendChild(dot);
+        chip.appendChild(document.createTextNode(m));
+        chip.title = isOnline
+          ? (agentSummaries[m] ?? (m.includes('gateway') ? '网关' : '能力未上报（旧代码）'))
+          : `${m} (离线)`;
+        chips.appendChild(chip);
+      }
+    }
     // ── UI helpers ──
     function fmtTime(ts) {
       const d = new Date(ts);
@@ -1011,6 +1204,15 @@
       // Notifications
       if (msg.method) {
         switch (msg.method) {
+          case 'room/presence': {
+            const p = msg.params;
+            if (p && Array.isArray(p.members) && Array.isArray(p.online)) {
+              memberListByRoom.set(p.room, p.members);
+              presenceByRoom.set(p.room, new Set(p.online));
+              if (p.room === currentRoom) renderMemberChips(p.room);
+            }
+            break;
+          }
           case 'turn/started':
             lastActivityAt = Date.now();
             showTyping();
@@ -1169,15 +1371,19 @@
       await refreshAgentCards();
 
       const room = roomList.find(r => r.name === name);
-      const chips = document.getElementById('memberChips');
-      chips.innerHTML = '';
-      for (const m of room?.members ?? []) {
-        const chip = document.createElement('span');
-        chip.className = `member-chip ${m.includes('gateway') ? '' : 'agent'}`;
-        chip.textContent = m;
-        chip.title = agentSummaries[m] ?? (m.includes('gateway') ? '网关' : '能力未上报（旧代码）');
-        chips.appendChild(chip);
-      }
+      // Refresh member list cache + fetch an immediate presence snapshot.
+      // The 15s polling loop will keep this fresh; this just avoids the
+      // "all offline" flash before the first tick lands.
+      if (room?.members) memberListByRoom.set(name, room.members);
+      renderMemberChips(name);
+      try {
+        const p = await rpc('room/presence/get', { room: name });
+        if (p.result) {
+          memberListByRoom.set(name, p.result.members ?? room?.members ?? []);
+          presenceByRoom.set(name, new Set(p.result.online ?? []));
+          renderMemberChips(name);
+        }
+      } catch { /* registry blip → keep cached state, presence WS will recover */ }
 
       const msgs = document.getElementById('messages');
       msgs.innerHTML = '';
@@ -1188,6 +1394,10 @@
         renderRoomMessage(m);
       }
       refreshTasks();
+      // 设置面板打开时切房需重拉成员配置
+      if (!document.getElementById('settingsPanel').classList.contains('hidden')) {
+        loadAgentConfigs();
+      }
     }
 
     async function createRoomPrompt() {
@@ -1602,6 +1812,154 @@
       } finally {
         document.getElementById('sendBtn').disabled = false;
       }
+    }
+    // ── Settings panel ──
+    // 与 task-panel 互斥打开；保存成功后按钮短暂变 ✓，失败/未保存显示文案。
+    function toggleSettingsPanel() {
+      const sp = document.getElementById('settingsPanel');
+      const tp = document.getElementById('taskPanel');
+      const willShow = sp.classList.contains('hidden');
+      if (willShow) {
+        tp.classList.add('hidden');
+        sp.classList.remove('hidden');
+        refreshSettingsPanel();
+      } else {
+        sp.classList.add('hidden');
+      }
+    }
+
+    async function refreshSettingsPanel() {
+      await Promise.all([loadGatewayConfig(), loadAgentConfigs()]);
+    }
+
+    async function loadGatewayConfig() {
+      const res = await rpc('gateway/config/get');
+      const cfg = res.result ?? {};
+      document.getElementById('settingsUserName').value = cfg.userName ?? '';
+      document.getElementById('settingsContextTokens').value = cfg.contextTokens ?? 3000;
+    }
+
+    async function loadAgentConfigs() {
+      const hint = document.getElementById('settingsAgentHint');
+      const list = document.getElementById('settingsAgentList');
+      if (!currentRoom) {
+        hint.textContent = '请先进入一个聊天室';
+        list.innerHTML = '';
+        return;
+      }
+      hint.textContent = `房间 #${currentRoom} 的成员配置`;
+      list.innerHTML = '<div class="settings-hint">加载中…</div>';
+      const res = await rpc('agent/config/getAll', { room: currentRoom });
+      const agents = res.result?.agents ?? [];
+      list.innerHTML = '';
+      if (agents.length === 0) {
+        list.innerHTML = '<div class="settings-hint">房间内暂无其他 agent</div>';
+        return;
+      }
+      for (const a of agents) list.appendChild(renderAgentConfigCard(a));
+    }
+
+    function renderAgentConfigCard(a) {
+      const card = document.createElement('div');
+      card.className = 'settings-agent-card';
+      const isOffline = !a.online;
+      const hasError = !!a.error;
+      if (isOffline) card.classList.add('is-offline');
+      if (hasError) card.classList.add('is-error');
+      const cfg = a.config ?? {};
+      const persona = cfg.persona ?? '';
+      const modelSmall = cfg.modelSmall ?? '';
+      const host = cfg.host ?? '?';
+      card.innerHTML = `
+        <div class="settings-agent-head">
+          <span class="presence-dot"></span>
+          <span class="agent-id">${escapeHtml(a.agentId)}</span>
+          <span class="agent-host">@ ${escapeHtml(host)}</span>
+        </div>
+        ${hasError ? `<div class="error-msg">配置读取失败: ${escapeHtml(a.error ?? '')}</div>` : ''}
+        <div class="settings-row">
+          <label>persona</label>
+          <textarea data-role="persona" rows="2">${escapeHtml(persona)}</textarea>
+        </div>
+        <div class="settings-row">
+          <label>modelSmall</label>
+          <input data-role="modelSmall" value="${escapeHtml(modelSmall)}" />
+        </div>
+        <div class="settings-actions-row">
+          <button data-role="save">保存</button>
+          <span class="settings-status" data-role="status"></span>
+        </div>
+      `;
+      // agent 上线点：offline = 半透明灰点（PresenceAgent 的 .is-offline 处理），
+      // online = 绿点。host 上报失败时 host 显示 "?"；online=false 整张卡半透明。
+      if (isOffline) card.classList.add('offline');
+      const saveBtn = card.querySelector('[data-role="save"]');
+      const status = card.querySelector('[data-role="status"]');
+      saveBtn.onclick = async () => {
+        saveBtn.disabled = true;
+        status.textContent = '';
+        status.className = 'settings-status';
+        const personaEl = card.querySelector('[data-role="persona"]');
+        const modelSmallEl = card.querySelector('[data-role="modelSmall"]');
+        const r = await rpc('agent/config/set', {
+          room: currentRoom,
+          target: a.agentId,
+          patch: { persona: personaEl.value, modelSmall: modelSmallEl.value },
+        });
+        saveBtn.disabled = false;
+        if (r.error) {
+          status.textContent = `失败: ${r.error.message}`;
+          status.className = 'settings-status err';
+          return;
+        }
+        if (!r.result?.ok) {
+          status.textContent = `失败: ${r.result?.error ?? 'unknown'}`;
+          status.className = 'settings-status err';
+          return;
+        }
+        saveBtn.classList.add('saved');
+        saveBtn.textContent = '✓';
+        status.textContent = '已保存';
+        status.className = 'settings-status ok';
+        setTimeout(() => {
+          saveBtn.classList.remove('saved');
+          saveBtn.textContent = '保存';
+        }, 1500);
+      };
+      return card;
+    }
+
+    async function saveGatewayConfig() {
+      const btn = document.getElementById('settingsGatewaySave');
+      const status = document.getElementById('settingsGatewayStatus');
+      const userName = document.getElementById('settingsUserName').value.trim();
+      const contextTokens = Number(document.getElementById('settingsContextTokens').value);
+      btn.disabled = true;
+      status.textContent = '';
+      status.className = 'settings-status';
+      const r = await rpc('gateway/config/set', {
+        userName: userName || undefined,
+        contextTokens: Number.isFinite(contextTokens) ? contextTokens : undefined,
+      });
+      btn.disabled = false;
+      if (r.error) {
+        status.textContent = `失败: ${r.error.message}`;
+        status.className = 'settings-status err';
+        return;
+      }
+      if (!r.result?.ok) {
+        status.textContent = '保存失败';
+        status.className = 'settings-status err';
+        return;
+      }
+      btn.classList.add('saved');
+      btn.textContent = '✓';
+      status.textContent = '已保存';
+      status.className = 'settings-status ok';
+      setTimeout(() => {
+        btn.classList.remove('saved');
+        btn.textContent = '保存';
+      }, 1500);
     }
 
     // ── Approval ──
