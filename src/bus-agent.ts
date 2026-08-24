@@ -45,7 +45,11 @@ let promiseModel: ModelProvider | undefined;
 if (process.env.MINIMAX_API_KEY) {
   const base = { apiKey: process.env.MINIMAX_API_KEY, baseUrl: process.env.MINIMAX_BASE_URL };
   const big = new MiniMaxProvider({ ...base, model: BIG_MODEL });
-  const small = SMALL_MODEL === BIG_MODEL ? big : new MiniMaxProvider({ ...base, model: SMALL_MODEL });
+  // 小脑做的是分类/裁决（judge/vote/promise），temperature=0 求确定性——
+  // 0.7 下同一承诺请求会随机 YES/NO 漂移（综合测试实测）。
+  const small = SMALL_MODEL === BIG_MODEL
+    ? big
+    : new MiniMaxProvider({ ...base, model: SMALL_MODEL, temperature: 0 });
   const wrap = (inner: ModelProvider, purpose: string, model: string) =>
     new RecordingProvider(inner, { agentId, purpose, model }, ledgerSink);
   replyModel = wrap(big, 'reply', BIG_MODEL);

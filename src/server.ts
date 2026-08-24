@@ -181,7 +181,7 @@ if (REGISTRY_URL && harness.server) {
   if (envConfig.modelProvider === 'minimax' && envConfig.model?.apiKey) {
     const smallModel = process.env.MINIMAX_MODEL_SMALL ?? envConfig.model.model ?? 'MiniMax-M3';
     const verifier = new RecordingProvider(
-      new MiniMaxProvider({ apiKey: envConfig.model.apiKey, baseUrl: envConfig.model.baseUrl, model: smallModel }),
+      new MiniMaxProvider({ apiKey: envConfig.model.apiKey, baseUrl: envConfig.model.baseUrl, model: smallModel, temperature: 0 }),
       { agentId: 'appserver', purpose: 'verify', model: smallModel },
       llmLedger.record,
     );
