@@ -346,6 +346,11 @@ const summary = await scheduler.mapReduce(
 
 消息按渠道隔离。`default` 渠道自动加入；`/register` 心跳每 30s 自愈渠道成员资格（registry 重启无需重启 agent）；3 分钟无心跳的成员被清扫。
 
+**安全与持久化**：
+- `BUS_TOKEN`：设置后所有端点（含 `/poll`）要求 `x-bus-token` 头，agent/gateway 端同名 env 注入；不设则开放（仅建议内网）。
+- `REGISTRY_STATE_FILE`：registry 快照落盘（agents/channels/queues，1s 防抖，原子替换）——**在途消息重启不丢**（邮箱模型：落盘是唯一事实源，唤醒可丢）。
+- 保留策略（gateway 侧，启动 + 每日）：`room_messages` 每房间保留最近 500 条；`done/cancelled` 任务与 `decided` 决策保留 90 天；principles 不删。
+
 | 端点 | 说明 |
 |------|------|
 | `POST /channels/create` | 创建（幂等），创建者加入 |
@@ -403,17 +408,20 @@ stateDiagram-v2
 ```bash
 # Registry（公网节点，单文件零依赖）
 npx esbuild src/registry-server.ts --bundle --platform=node --format=esm --outfile=registry.mjs
-REGISTRY_PORT=9876 node registry.mjs
+REGISTRY_PORT=9876 REGISTRY_STATE_FILE=./registry-state.json \
+BUS_TOKEN=shared-secret node registry.mjs
 
 # Bus Agent（任意机器）
 npx esbuild src/bus-agent.ts --bundle --platform=node --format=esm --outfile=bus-agent.mjs
 AGENT_ID=pi-agent REGISTRY_URL=http://registry:9876 BUS_CHANNEL=team \
+BUS_TOKEN=shared-secret \
 AGENT_PERSONA="树莓派/嵌入式/Linux运维专家" \
 MINIMAX_API_KEY=sk-... node bus-agent.mjs
 
 # Web 服务端（含聊天室 gateway）
 AGENT_MODEL_PROVIDER=minimax MINIMAX_API_KEY=sk-... \
-BUS_REGISTRY_URL=http://registry:9876 BUS_CHANNELS=team npm run server
+BUS_REGISTRY_URL=http://registry:9876 BUS_CHANNELS=team \
+BUS_TOKEN=shared-secret npm run server
 ```
 
 无 LLM key 的 bus-agent 自动降级为静默模式（不判断、不插嘴、不轻诺）。

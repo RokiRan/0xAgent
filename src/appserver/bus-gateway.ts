@@ -28,6 +28,8 @@ export interface RoomStore {
 export interface BusGatewayConfig {
   agentId: string;
   registryUrl: string;
+  /** Shared token when the registry gate is enabled. */
+  registryToken?: string;
   /** Channels to join on startup. */
   channels?: string[];
   /** Display name for messages sent from the web UI. */
@@ -69,9 +71,12 @@ export class BusGateway {
   private loadedRooms = new Set<string>();
   private listeners = new Set<(msg: RoomMessage) => void>();
 
+  private registryToken?: string;
+
   constructor(config: BusGatewayConfig) {
     this.agentId = config.agentId;
     this.registryUrl = config.registryUrl;
+    this.registryToken = config.registryToken;
     this.userName = config.userName ?? 'web-user';
     this.historySize = config.historySize ?? 100;
     this.store = config.store;
@@ -80,6 +85,7 @@ export class BusGateway {
     this.transport = new HttpTransport({
       agentId: config.agentId,
       registryUrl: config.registryUrl,
+      registryToken: config.registryToken,
       // extraChannels are re-joined on every heartbeat → membership survives registry restarts
       channels: config.channels ?? [],
     });
@@ -336,7 +342,9 @@ export class BusGateway {
   }
 
   private async getJson(url: string): Promise<unknown> {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: this.registryToken ? { 'x-bus-token': this.registryToken } : {},
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }

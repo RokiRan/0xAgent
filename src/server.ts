@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 import { BusGateway, RoomMessage } from './appserver/bus-gateway.js';
 import { TaskBoard } from './appserver/task-board.js';
 import { DecisionBoard } from './appserver/decision-board.js';
+import { startRetention } from './appserver/retention.js';
 import { createResponse, createError, createNotification, JsonRpcRequest } from './appserver/protocol.js';
 
 function loadEnvConfig(): Partial<HarnessV2Config> {
@@ -100,12 +101,14 @@ if (REGISTRY_URL && harness.server) {
   chatDb.exec('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room, id)');
   const insertMsg = chatDb.prepare('INSERT INTO room_messages (room, sender, kind, text, ts) VALUES (?, ?, ?, ?, ?)');
   const loadMsg = chatDb.prepare('SELECT room, sender, kind, text, ts FROM room_messages WHERE room = ? ORDER BY id DESC LIMIT ?');
+  startRetention(chatDb);
   // Row shape returned by better-sqlite3 .all(); boundary cast, column names are authoritative
   interface MsgRow { room: string; sender: string; kind: RoomMessage['kind']; text: string; ts: number }
 
   busGateway = new BusGateway({
     agentId: process.env.BUS_AGENT_ID ?? 'web-gateway',
     registryUrl: REGISTRY_URL,
+    registryToken: process.env.BUS_TOKEN || undefined,
     userName: process.env.BUS_USER_NAME ?? 'me',
     channels: (process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean),
     contextTokens: Number(process.env.BUS_CONTEXT_TOKENS) || 3000,
@@ -364,7 +367,9 @@ if (REGISTRY_URL && harness.server) {
   appServer.registerMethod('metrics/get', async (req) => {
     let registry: unknown;
     try {
-      const res = await fetch(`${REGISTRY_URL}/metrics`);
+      const res = await fetch(`${REGISTRY_URL}/metrics`, {
+        headers: process.env.BUS_TOKEN ? { 'x-bus-token': process.env.BUS_TOKEN } : {},
+      });
       registry = await res.json();
     } catch {
       registry = { error: 'registry unreachable' };

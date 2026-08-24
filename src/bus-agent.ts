@@ -41,7 +41,12 @@ function extractText(payload: unknown): string {
   return JSON.stringify(payload);
 }
 
-const transport = new HttpTransport({ agentId, registryUrl, channel });
+const transport = new HttpTransport({
+  agentId,
+  registryUrl,
+  channel,
+  registryToken: process.env.BUS_TOKEN || undefined,
+});
 const bus = new AgentBusImpl(agentId, transport);
 
 /** Strip <think>…</think> so only the spoken answer remains. */

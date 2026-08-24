@@ -6,12 +6,15 @@
 
 import { Transport, BusMessage } from './bus.js';
 import { createServer, request as httpRequest, IncomingMessage, ServerResponse, Server } from 'http';
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'fs';
 
 export interface HttpTransportConfig {
   agentId: string;
   port?: number;
   host?: string;
   registryUrl?: string; // Required for cross-network. e.g. 'http://registry.example.com:9876'
+  /** Shared token sent as x-bus-token when the registry has its gate enabled. */
+  registryToken?: string;
   /** Home channel for outgoing messages. Default 'default'. */
   channel?: string;
   /** Extra channels to join on connect. */
@@ -40,6 +43,7 @@ export class HttpTransport implements Transport {
   private handler?: (msg: BusMessage) => void;
   private peers = new Map<string, PeerInfo>();
   private registryUrl?: string;
+  private registryToken?: string;
   private channel: string;
   private extraChannels: string[];
   private heartbeatInterval?: ReturnType<typeof setInterval>;
@@ -51,6 +55,7 @@ export class HttpTransport implements Transport {
     this.port = config.port ?? 0;
     this.host = config.host ?? '127.0.0.1';
     this.registryUrl = config.registryUrl;
+    this.registryToken = config.registryToken;
     this.channel = config.channel ?? 'default';
     this.extraChannels = config.channels ?? [];
     // If registryUrl is set, we use registry relay for cross-network scenarios
@@ -217,6 +222,7 @@ export class HttpTransport implements Transport {
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(body),
+            ...(this.registryToken ? { 'x-bus-token': this.registryToken } : {}),
           },
         },
         (res) => {
@@ -244,6 +250,7 @@ export class HttpTransport implements Transport {
           port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
           path: parsedUrl.pathname + parsedUrl.search,
           method: 'GET',
+          headers: this.registryToken ? { 'x-bus-token': this.registryToken } : {},
         },
         (res) => {
           let body = '';
@@ -339,13 +346,74 @@ function payloadText(msg: BusMessage): string {
   return JSON.stringify(p)?.slice(0, 500) ?? '';
 }
 
-export function createRegistryServer(port = 9876): Server {
+export interface RegistryOptions {
+  /** Snapshot file for agents/channels/queues; empty = memory-only. */
+  stateFile?: string;
+  /** Shared token required on every endpoint when set (empty = open). */
+  token?: string;
+}
+
+interface PersistedState {
+  agents: PeerInfo[];
+  channels: { name: string; members: string[]; seq: number; log: { seq: number; from: string; text: string }[] }[];
+  queues: { agentId: string; msgs: QueuedMessage[] }[];
+}
+
+export function createRegistryServer(port = 9876, options: RegistryOptions = {}): Server {
   const agents = new Map<string, PeerInfo>();
   const queues = new Map<string, QueuedMessage[]>();
   // channel name -> state. 'default' always exists; /register auto-joins it.
   const channels = new Map<string, ChannelState>([['default', newChannelState()]]);
   const MAX_QUEUE_SIZE = 1000;
   const MSG_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  // ── Persistence (邮箱模型: 落盘是唯一事实源，重启不丢在途消息) ──
+  const stateFile = options.stateFile ?? '';
+  if (stateFile && existsSync(stateFile)) {
+    try {
+      const saved = JSON.parse(readFileSync(stateFile, 'utf8')) as PersistedState;
+      const now = Date.now();
+      for (const a of saved.agents ?? []) agents.set(a.agentId, a);
+      for (const c of saved.channels ?? []) {
+        const st = newChannelState();
+        st.members = new Set(c.members);
+        st.seq = c.seq;
+        st.log = c.log ?? [];
+        channels.set(c.name, st);
+      }
+      for (const q of saved.queues ?? []) {
+        // Drop messages past TTL — 过期的信不再投递
+        queues.set(q.agentId, (q.msgs ?? []).filter((m) => now - m.enqueuedAt < MSG_TTL_MS));
+      }
+      console.log(`[AgentBus] Restored state: ${agents.size} agents, ${channels.size} channels`);
+    } catch (err) {
+      console.error('[AgentBus] State file unreadable, starting fresh:', err);
+    }
+  }
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleSave(): void {
+    if (!stateFile || saveTimer) return;
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined;
+      const snapshot: PersistedState = {
+        agents: [...agents.values()],
+        channels: [...channels.entries()].map(([name, st]) => ({
+          name,
+          members: [...st.members],
+          seq: st.seq,
+          log: st.log,
+        })),
+        queues: [...queues.entries()].map(([agentId, msgs]) => ({ agentId, msgs })),
+      };
+      const tmp = `${stateFile}.tmp`;
+      try {
+        writeFileSync(tmp, JSON.stringify(snapshot));
+        renameSync(tmp, stateFile); // atomic replace
+      } catch (err) {
+        console.error('[AgentBus] State save failed:', err);
+      }
+    }, 1000);
+  }
 
   // Gate observability (cumora §7.3): what fires, how often
   const metrics = {
@@ -364,12 +432,19 @@ export function createRegistryServer(port = 9876): Server {
   // hold-token: override = confirming already-shown state; single-use, 120s TTL.
   const holds = new Map<string, { token: string; seq: number; expires: number }>(); // key: `${agentId}|${channel}`
 
-  const server = createServer((req, res) => {    res.setHeader('Content-Type', 'application/json');
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
 
     const sendJson = (status: number, data: unknown) => {
       res.writeHead(status);
       res.end(JSON.stringify(data));
     };
+
+    // Token gate: when BUS_TOKEN is set, every endpoint requires it
+    if (options.token && req.headers['x-bus-token'] !== options.token) {
+      sendJson(401, { error: 'Unauthorized' });
+      return;
+    }
 
     // POST /register — Agent heartbeat + registration
     if (req.method === 'POST' && req.url === '/register') {
@@ -378,6 +453,7 @@ export function createRegistryServer(port = 9876): Server {
           const data = JSON.parse(body) as { agentId: string; url: string };
           agents.set(data.agentId, { agentId: data.agentId, url: data.url, lastSeen: Date.now() });
           channels.get('default')!.members.add(data.agentId);
+          scheduleSave();
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -394,6 +470,7 @@ export function createRegistryServer(port = 9876): Server {
           agents.delete(data.agentId);
           queues.delete(data.agentId);
           for (const st of channels.values()) st.members.delete(data.agentId);
+          scheduleSave();
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -411,6 +488,7 @@ export function createRegistryServer(port = 9876): Server {
           const existed = channels.has(data.channel);
           if (!existed) channels.set(data.channel, newChannelState());
           if (data.agentId) channels.get(data.channel)!.members.add(data.agentId);
+          scheduleSave();
           sendJson(200, { ok: true, created: !existed });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -427,6 +505,7 @@ export function createRegistryServer(port = 9876): Server {
           const st = channels.get(data.channel);
           if (!st) { sendJson(404, { error: 'Channel not found' }); return; }
           st.members.add(data.agentId);
+          scheduleSave();
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -441,6 +520,7 @@ export function createRegistryServer(port = 9876): Server {
         try {
           const data = JSON.parse(body) as { channel: string; agentId: string };
           channels.get(data.channel)?.members.delete(data.agentId);
+          scheduleSave();
           sendJson(200, { ok: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -459,6 +539,7 @@ export function createRegistryServer(port = 9876): Server {
             return;
           }
           const existed = channels.delete(data.channel);
+          scheduleSave();
           sendJson(200, { ok: true, deleted: existed });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -516,6 +597,7 @@ export function createRegistryServer(port = 9876): Server {
             queue.shift(); // Drop oldest
           }
           metrics.relays++;
+          scheduleSave();
           sendJson(200, { queued: true });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -538,6 +620,7 @@ export function createRegistryServer(port = 9876): Server {
       // Filter expired messages, return valid ones, clear queue
       const valid = queue.filter(q => now - q.enqueuedAt < MSG_TTL_MS).map(q => q.msg);
       queues.set(agentId, []); // Clear after poll
+      scheduleSave();
 
       // Advance seen cursors to the max delivered seq per channel
       for (const m of valid) {
@@ -651,6 +734,7 @@ export function createRegistryServer(port = 9876): Server {
             }
           }
           metrics.broadcasts++;
+          scheduleSave();
           sendJson(200, { queued: count });
         } catch {
           sendJson(400, { error: 'Invalid JSON' });
@@ -697,6 +781,7 @@ export function createRegistryServer(port = 9876): Server {
         queues.delete(id);
         for (const st of channels.values()) st.members.delete(id);
         metrics.evicted++;
+        scheduleSave();
       }
     }
   }, 60000);
