@@ -426,6 +426,23 @@ agent 提交任务 evidence 后、进 `review` 前，小脑对账 acceptance × 
 
 多 agent 协调的反模式与事故记录（含常量校准依据）见 [docs/COORDINATION.md](docs/COORDINATION.md)。改协调闸门数值前必读。
 
+### 编码引擎（Coding Engine，BYOA 最小版）
+
+agent 的编码任务可委派给真实编码 CLI 执行——产出是真实文件副作用而非空谈：
+
+```bash
+# bus-agent 环境变量
+CODING_ENGINE=omp        # 或 claude；不设 = LLM-only 旧行为
+CODING_WORKDIR=/tmp/0xagent-work   # 默认 $TMPDIR/0xagent-work（刻意不落仓库根：引擎持写权限，边界必须显式）
+CODING_TIMEOUT_MS=240000           # 默认 240s（< task-board 5min 派发超时）
+CODING_BIN=/path/to/binary         # 可选，覆盖二进制路径
+```
+
+- **omp**：`omp -p --auto-approve --no-session`，本机已装即可用，无 per-call 成本
+- **claude**：`claude -p --output-format json --permission-mode bypassPermissions`，JSON 输出自带 `total_cost_usd` 回传
+- 引擎调用按 `purpose='task'`、`model='engine:<id>'` 入台账；token 不可得时 `measured=false` 记 0 不猜
+- 新增引擎 = 实现 `CodingEngine` 接口（`src/plugins/engine/index.ts`），bus-agent 主流程无感
+
 ### 部署
 
 ```bash

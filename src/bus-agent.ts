@@ -16,6 +16,7 @@ import { AgentBusImpl } from './plugins/agent-bus/bus.js';
 import { HttpTransport } from './plugins/agent-bus/http-transport.js';
 import { MiniMaxProvider } from './plugins/model/minimax.js';
 import { RecordingProvider, httpLedgerSink } from './plugins/model/recording.js';
+import { createEngineFromEnv } from './plugins/engine/index.js';
 import type { ModelProvider } from './plugins/model/interface.js';
 
 const agentId = process.env.AGENT_ID ?? '';
@@ -36,6 +37,11 @@ const SMALL_MODEL = process.env.MINIMAX_MODEL_SMALL ?? BIG_MODEL;
 // 台账（cumora §7.3）：provider 层收口记账，上报 registry /llm-calls，
 // fire-and-forget——上报失败绝不影响调用本身。
 const ledgerSink = httpLedgerSink(registryUrl, process.env.BUS_TOKEN || undefined);
+
+// 编码引擎（omp / claude-code）：配置后任务委派给真实编码 CLI 执行，
+// 不设则维持 LLM-only 空谈旧行为。
+const coding = createEngineFromEnv();
+if (coding.engine) console.log(`[${agentId}] coding engine: ${coding.engine.id} (workdir ${coding.workdir})`);
 
 let replyModel: ModelProvider | undefined;
 let taskModel: ModelProvider | undefined;
@@ -155,6 +161,20 @@ ${action === 'rework' ? `上一次交付被退回，退回原因：${note}\n请�
 请直接完成任务并给出交付物。你的回复将全文作为验收证据提交，请确保逐条满足验收标准。`;
 
   try {
+    // 编码引擎优先：任务委派给真实 CLI 执行，产出是真实副作用而非空谈。
+    if (coding.engine) {
+      const started = Date.now();
+      const enginePrompt = `你是 agent「${agentId}」${persona ? `（专长：${persona}）` : ''}，在工作目录中完成以下任务。\n${prompt}`;
+      try {
+        const result = await coding.engine.run({ prompt: enginePrompt, workdir: coding.workdir, timeoutMs: coding.timeoutMs });
+        ledgerSink({ ts: started, agentId, purpose: 'task', model: `engine:${coding.engine.id}`, measured: false, latencyMs: result.durationMs, status: 'ok' });
+        reply({ kind: 'task', taskId, action: 'submit', agent: agentId, evidence: result.text });
+      } catch (err) {
+        ledgerSink({ ts: started, agentId, purpose: 'task', model: `engine:${coding.engine.id}`, measured: false, latencyMs: Date.now() - started, status: 'error' });
+        reply({ kind: 'task', taskId, action: 'failed', agent: agentId, error: String(err) });
+      }
+      return;
+    }
     const answer = taskModel
       ? stripThink((await taskModel.generate([
           { role: 'system', content: `You are agent "${agentId}".${persona ? ` 你的专长：${persona}。` : ''} 完成任务并用中文交付。` },
