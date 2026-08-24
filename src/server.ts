@@ -108,6 +108,10 @@ if (REGISTRY_URL && harness.server) {
     registryUrl: REGISTRY_URL,
     userName: process.env.BUS_USER_NAME ?? 'me',
     channels: (process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean),
+    contextTokens: Number(process.env.BUS_CONTEXT_TOKENS) || 3000,
+    // cumora §6.6 focus window: probe TaskBoard for active leases.
+    // Lazy closure — taskBoard is constructed below but only called at chat time.
+    isFocused: (agentId, room) => taskBoard.ownersInFocus(room).includes(agentId),
     store: {
       insert: (m) => { insertMsg.run(m.room, m.from, m.kind, m.text, m.ts); },
       load: (room, limit) =>
@@ -152,6 +156,12 @@ if (REGISTRY_URL && harness.server) {
     postMessage: (room, text) => busGateway!.postSystemMessage(room, text),
     listMembers: (room) => busGateway!.listMembers(room),
   });
+  // cumora §6.6: window-end digest delivery — flush on task transitions and
+  // a 30s sweep (covers lease-expiry recycle ending a window with no RPC).
+  const flushFocus = (room?: string) =>
+    busGateway!.flushDigests(room).catch((err) => console.error('[focus] digest flush failed:', err));
+  setInterval(() => flushFocus(), 30000).unref();
+
   appServer.registerMethod('task/create', (req) => {
     const room = param(req, 'room');
     const title = param(req, 'title');
@@ -175,6 +185,7 @@ if (REGISTRY_URL && harness.server) {
     const id = param(req, 'taskId');
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
+      flushFocus();
       return createResponse(req.id, { task: taskBoard.approve(id) });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
@@ -185,6 +196,7 @@ if (REGISTRY_URL && harness.server) {
     const note = param(req, 'note') ?? '未说明原因';
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
+      flushFocus();
       return createResponse(req.id, { task: taskBoard.returnTask(id, note) });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
@@ -195,6 +207,7 @@ if (REGISTRY_URL && harness.server) {
     const adr = param(req, 'adr') ?? '';
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
+      flushFocus();
       return createResponse(req.id, { task: taskBoard.cancel(id, adr) });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
@@ -205,6 +218,7 @@ if (REGISTRY_URL && harness.server) {
     const evidence = param(req, 'evidence') ?? '';
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
+      flushFocus();
       return createResponse(req.id, { task: taskBoard.reopen(id, evidence) });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
@@ -215,6 +229,7 @@ if (REGISTRY_URL && harness.server) {
     const owner = param(req, 'owner');
     if (!id || !owner) return createError(req.id, -32602, 'Missing taskId or owner');
     try {
+      flushFocus();
       return createResponse(req.id, { task: taskBoard.reassign(id, owner) });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
@@ -224,6 +239,7 @@ if (REGISTRY_URL && harness.server) {
     const id = param(req, 'taskId');
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
+      flushFocus();
       return createResponse(req.id, { task: taskBoard.confirm(id) });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));

@@ -168,15 +168,21 @@ export class ThreadMemory {
     }
   }
 
-  // Search across all indexed threads
-  search(query: string, topK = 5): Array<{
+  // Search indexed threads; pass threadId to isolate to one conversation
+  // (default is unfiltered for explicit memory/search tooling)
+  search(query: string, topK = 5, threadId?: string): Array<{
     content: string;
     score: number;
     threadId: string;
     turnId: string;
     role?: string;
   }> {
-    return this.vectorMemory.search(query, topK).map(r => ({
+    // Over-fetch when filtering so post-filter still yields topK candidates
+    const results = this.vectorMemory.search(query, threadId ? topK * 4 : topK);
+    const filtered = threadId
+      ? results.filter((r) => String(r.document.metadata?.threadId ?? '') === threadId)
+      : results;
+    return filtered.slice(0, topK).map(r => ({
       content: r.document.content,
       score: r.score,
       threadId: String(r.document.metadata?.threadId ?? ''),
@@ -185,9 +191,11 @@ export class ThreadMemory {
     }));
   }
 
-  // Get relevant context for a query (for prompt augmentation)
-  getRelevantContext(query: string, maxTokens = 2000): string {
-    const results = this.search(query, 5);
+  // Get relevant context for a query (for prompt augmentation).
+  // threadId scopes retrieval to the current conversation — cross-thread
+  // recall stays available via the explicit memory/search API.
+  getRelevantContext(query: string, maxTokens = 2000, threadId?: string): string {
+    const results = this.search(query, 5, threadId);
     if (results.length === 0) return '';
 
     let context = 'Relevant previous context:\n';

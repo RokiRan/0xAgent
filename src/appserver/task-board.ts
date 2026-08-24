@@ -165,6 +165,17 @@ export class TaskBoard {
     return rows.map(rowToTask);
   }
 
+  /**
+   * cumora §6.6 focus window 判定：owner 持有 in_progress 租约即处于深度工作期。
+   * 判定只读 DB 事实，不看措辞；lease 逾期由 reaper 回收后自动退出窗口。
+   */
+  ownersInFocus(room: string): string[] {
+    const rows = this.db
+      .prepare("SELECT DISTINCT owner FROM room_tasks WHERE room = ? AND state = 'in_progress' AND owner IS NOT NULL")
+      .all(room) as Array<{ owner: string }>;
+    return rows.map((r) => r.owner);
+  }
+
   /** Human/approver confirms: review → done. 关闭即写五行 ADR。 */
   approve(id: string): RoomTask {
     const task = this.mustGet(id);

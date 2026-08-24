@@ -36,6 +36,17 @@ export interface BusGatewayConfig {
   historySize?: number;
   /** Optional persistence; without it room history is memory-only. */
   store?: RoomStore;
+  /**
+   * cumora §6.6 focus window probe: returns true when the agent holds an
+   * active lease (deep work). Focused agents are skipped on room fan-out;
+   * their messages accumulate in a digest flushed when the window ends.
+   */
+  isFocused?: (agentId: string, room: string) => boolean;
+  /**
+   * Room context budget in approximate tokens (chars/2, CJK-biased).
+   * Default 3000. Replaces the old fixed slice(-10) window.
+   */
+  contextTokens?: number;
 }
 
 export class BusGateway {
@@ -46,10 +57,16 @@ export class BusGateway {
   private userName: string;
   private historySize: number;
   private store?: RoomStore;
+  private isFocused?: (agentId: string, room: string) => boolean;
+  private contextTokens: number;
+  /** Focus-window digests: `${room}:${agentId}` → held messages (cap 50, oldest dropped). */
+  private digests = new Map<string, RoomMessage[]>();
+  private static readonly DIGEST_CAP = 50;
   /** 存储降级：连续 3 次写失败 → degraded（聊天 fail-open，标记可观测）。 */
   private storeFailures = 0;
   private degraded = false;
   private history = new Map<string, RoomMessage[]>();
+  private loadedRooms = new Set<string>();
   private listeners = new Set<(msg: RoomMessage) => void>();
 
   constructor(config: BusGatewayConfig) {
@@ -58,6 +75,8 @@ export class BusGateway {
     this.userName = config.userName ?? 'web-user';
     this.historySize = config.historySize ?? 100;
     this.store = config.store;
+    this.isFocused = config.isFocused;
+    this.contextTokens = config.contextTokens ?? 3000;
     this.transport = new HttpTransport({
       agentId: config.agentId,
       registryUrl: config.registryUrl,
@@ -111,19 +130,106 @@ export class BusGateway {
 
   getHistory(room: string): RoomMessage[] {
     let buf = this.history.get(room);
-    if (!buf && this.store) {
-      buf = this.store.load(room, this.historySize);
+    if (!buf) {
+      buf = [];
       this.history.set(room, buf);
     }
-    return buf ?? [];
+    // Lazy-load persisted history exactly once per room, even when the first
+    // access is emit() (a send before any history view) — otherwise the
+    // in-memory buf shadowed the store for the whole session.
+    if (!this.loadedRooms.has(room)) {
+      this.loadedRooms.add(room);
+      if (this.store) buf.push(...this.store.load(room, this.historySize));
+    }
+    return buf;
+  }
+
+  /**
+   * Assemble room context under a token budget (chars/2, CJK-biased).
+   * Walks history newest-first; messages that don't fit are reported as an
+   * explicit omission count so agents know the record is incomplete.
+   * Over-long single messages are cut with a visible marker.
+   */
+  private buildContext(room: string): string[] {
+    const history = this.getHistory(room);
+    const budgetChars = this.contextTokens * 2;
+    const lines: string[] = [];
+    let used = 0;
+    let omitted = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i];
+      const text = m.text.length > 500 ? `${m.text.slice(0, 500)}…[截断]` : m.text;
+      const line = `${m.from}: ${text}`;
+      if (used + line.length > budgetChars) {
+        omitted = i + 1;
+        break;
+      }
+      lines.unshift(line);
+      used += line.length;
+    }
+    if (omitted > 0) lines.unshift(`（上下文预算限制：省略了更早的 ${omitted} 条消息）`);
+    return lines;
+  }
+
+  /** Queue a message into an agent's focus-window digest. */
+  private queueDigest(room: string, agentId: string, msg: RoomMessage): void {
+    const key = `${room}:${agentId}`;
+    let q = this.digests.get(key);
+    if (!q) {
+      q = [];
+      this.digests.set(key, q);
+    }
+    q.push(msg);
+    if (q.length > BusGateway.DIGEST_CAP) q.shift();
+  }
+
+  /**
+   * cumora §6.6: flush digests whose focus window has ended (task closed,
+   * lease recycled, or natural boundary). Delivered as one batched chat
+   * event marked human so the agent evaluates missed requests.
+   * Returns agentIds that were flushed.
+   */
+  async flushDigests(room?: string): Promise<string[]> {
+    if (!this.isFocused) return [];
+    const flushed: string[] = [];
+    for (const [key, queue] of this.digests) {
+      if (queue.length === 0) continue;
+      const sep = key.indexOf(':');
+      const r = key.slice(0, sep);
+      const agentId = key.slice(sep + 1);
+      if (room && r !== room) continue;
+      if (this.isFocused(agentId, r)) continue;
+      this.digests.delete(key);
+      const body = queue
+        .map((m) => `${m.from}: ${m.text.length > 200 ? `${m.text.slice(0, 200)}…` : m.text}`)
+        .join('\n');
+      await this.transport.send({
+        id: `${this.agentId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        type: 'event',
+        from: this.agentId,
+        to: agentId,
+        payload: {
+          kind: 'chat',
+          room: r,
+          from: 'digest',
+          human: true,
+          text: `【专注窗口结束，补发期间 ${queue.length} 条房间消息】\n${body}`,
+          context: this.buildContext(r),
+        },
+        channel: r,
+        timestamp: Date.now(),
+      });
+      flushed.push(agentId);
+    }
+    return flushed;
   }
 
   /**
    * Send a chat message to a room.
-   * - With @mentions: direct bus request to each mentioned agent (they must answer).
-   * - Without mentions: broadcast the message as a channel event marked human;
-   *   each agent decides for itself whether to interject, and speaks by posting
-   *   a chat event back into the channel.
+   * - With @mentions: direct bus request to each mentioned agent (直聊, always
+   *   delivered — focus window does not gate DMs).
+   * - Without mentions: per-member fan-out; focused agents are skipped and the
+   *   message lands in their digest instead (cumora §6.6).
    */
   async sendChat(room: string, text: string): Promise<{ delivered: string[] }> {
     const members = await this.listMembers(room);
@@ -132,22 +238,35 @@ export class BusGateway {
 
     this.emit({ room, from: this.userName, kind: 'user', text, ts: Date.now() });
 
-    // Recent room context so agents see each other's messages (讨论的基础)
-    const context = this.getHistory(room)
-      .slice(-10)
-      .map((m) => `${m.from}: ${m.text.slice(0, 500)}`);
+    // Natural boundary: agents whose window ended since last message catch up first.
+    await this.flushDigests(room);
+
+    // Recent room context so agents see each other's messages (讨论的基础),
+    // assembled under a token budget with explicit omission markers.
+    const context = this.buildContext(room);
 
     if (mentions.length === 0) {
-      await this.transport.send({
-        id: `${this.agentId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-        type: 'event',
-        from: this.agentId,
-        to: 'broadcast',
-        payload: { kind: 'chat', room, from: this.userName, human: true, text, context },
-        channel: room,
-        timestamp: Date.now(),
-      });
-      return { delivered: candidates };
+      // Per-member relay (not a channel broadcast) so focused agents can be
+      // excluded selectively — a broadcast would reach them via /poll regardless.
+      const delivered: string[] = [];
+      for (const member of candidates) {
+        const msg = {
+          id: `${this.agentId}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+          type: 'event' as const,
+          from: this.agentId,
+          to: member,
+          payload: { kind: 'chat', room, from: this.userName, human: true, text, context },
+          channel: room,
+          timestamp: Date.now(),
+        };
+        if (this.isFocused?.(member, room)) {
+          this.queueDigest(room, member, { room, from: this.userName, kind: 'user', text, ts: msg.timestamp });
+          continue;
+        }
+        await this.transport.send(msg);
+        delivered.push(member);
+      }
+      return { delivered };
     }
 
     const targets = candidates.filter((m) => mentions.includes(m));
@@ -186,11 +305,9 @@ export class BusGateway {
   }
 
   private emit(msg: RoomMessage): void {
-    let buf = this.history.get(msg.room);
-    if (!buf) {
-      buf = [];
-      this.history.set(msg.room, buf);
-    }
+    // Route through getHistory so the first-ever message also triggers the
+    // one-time store load (keeps persisted history ahead of new messages).
+    const buf = this.getHistory(msg.room);
     buf.push(msg);
     if (buf.length > this.historySize) buf.shift();
     try {

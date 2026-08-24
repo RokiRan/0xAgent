@@ -220,21 +220,22 @@ export class AppServerV2 {
   }
 
   // --- Memory handlers ---
+  // Explicit retrieval tooling; unfiltered by default, optional threadId scope.
   private handleMemorySearch(req: JsonRpcRequest): JsonRpcResponse {
-    const params = req.params as { query: string; topK?: number };
+    const params = req.params as { query: string; topK?: number; threadId?: string };
     if (!this.memory) {
       return createResponse(req.id, { results: [] });
     }
-    const results = this.memory.search(params.query, params.topK ?? 5);
+    const results = this.memory.search(params.query, params.topK ?? 5, params.threadId);
     return createResponse(req.id, { results });
   }
 
   private handleMemoryContext(req: JsonRpcRequest): JsonRpcResponse {
-    const params = req.params as { query: string; maxTokens?: number };
+    const params = req.params as { query: string; maxTokens?: number; threadId?: string };
     if (!this.memory) {
       return createResponse(req.id, { context: '' });
     }
-    const context = this.memory.getRelevantContext(params.query, params.maxTokens ?? 2000);
+    const context = this.memory.getRelevantContext(params.query, params.maxTokens ?? 2000, params.threadId);
     return createResponse(req.id, { context });
   }
 
@@ -256,10 +257,11 @@ export class AppServerV2 {
     // Build prompt with cache-aware ordering
     const history = this.turnsToMessages(thread.turns.slice(0, -1));
 
-    // Inject relevant memory context
+    // Inject relevant memory context — scoped to this thread so one
+    // conversation's content never leaks into another's prompt
     let memoryContext = '';
     if (this.memory) {
-      memoryContext = this.memory.getRelevantContext(userInput);
+      memoryContext = this.memory.getRelevantContext(userInput, 2000, thread.id);
       if (memoryContext) {
         this.broadcast(createNotification('memory/context_injected', {
           turnId: turn.id,
