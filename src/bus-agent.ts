@@ -17,6 +17,7 @@ import { HttpTransport } from './plugins/agent-bus/http-transport.js';
 import { MiniMaxProvider } from './plugins/model/minimax.js';
 import { RecordingProvider, httpLedgerSink } from './plugins/model/recording.js';
 import { createEngineFromEnv } from './plugins/engine/index.js';
+import { powerHostFromEnv, matchPowerIntent, powerExecute, PowerAction } from './plugins/power/index.js';
 import type { ModelProvider } from './plugins/model/interface.js';
 
 const agentId = process.env.AGENT_ID ?? '';
@@ -42,6 +43,11 @@ const ledgerSink = httpLedgerSink(registryUrl, process.env.BUS_TOKEN || undefine
 // 不设则维持 LLM-only 空谈旧行为。
 const coding = createEngineFromEnv();
 if (coding.engine) console.log(`[${agentId}] coding engine: ${coding.engine.id} (workdir ${coding.workdir})`);
+
+// 电源控制（env 白名单，只装同 LAN 的 agent）：意图确定性匹配，
+// LLM 无法改目标；kind:'power' 走结构化通道，聊天走意图识别。
+const powerHost = powerHostFromEnv();
+if (powerHost) console.log(`[${agentId}] power control: ${powerHost.name} (${powerHost.ip})`);
 
 let replyModel: ModelProvider | undefined;
 let taskModel: ModelProvider | undefined;
@@ -256,9 +262,40 @@ bus.onRequest(async (payload, reply) => {
     await handlePromiseConfirm(payload, reply);
     return;
   }
+  // 结构化电源通道：{kind:'power', action:'on'|'off'|'status'}
+  if (payload && typeof payload === 'object' && 'kind' in payload && payload.kind === 'power') {
+    if (!powerHost) {
+      reply({ ok: false, error: 'power control not configured' });
+      return;
+    }
+    const action = 'action' in payload && typeof payload.action === 'string' ? payload.action : '';
+    if (action !== 'on' && action !== 'off' && action !== 'status') {
+      reply({ ok: false, error: `unknown action: ${action}` });
+      return;
+    }
+    try {
+      reply({ ok: true, result: await powerExecute(powerHost, action as PowerAction) });
+    } catch (err) {
+      reply({ ok: false, error: String(err) });
+    }
+    return;
+  }
   const text = extractText(payload);
   const ctx = payload && typeof payload === 'object' ? extractContext(payload) : [];
   console.log(`[${agentId}] request: ${text.slice(0, 120)}`);
+  // 聊天里的电源意图（@ 点名路径）：确定性匹配，优先于 LLM
+  if (powerHost) {
+    const action = matchPowerIntent(text, powerHost);
+    if (action) {
+      console.log(`[${agentId}] power intent: ${action}`);
+      try {
+        reply({ agent: agentId, host: os.hostname(), text: await powerExecute(powerHost, action) });
+      } catch (err) {
+        reply({ agent: agentId, host: os.hostname(), error: String(err) });
+      }
+      return;
+    }
+  }
   try {
     reply({ agent: agentId, host: os.hostname(), text: await answerText(text, extractFrom(payload) ?? 'someone', ctx) });
   } catch (err) {
@@ -284,6 +321,17 @@ bus.onMessage(async (msg) => {
   const from = 'from' in p && typeof p.from === 'string' ? p.from : msg.from;
   const room = msg.channel ?? channel;
   console.log(`[${agentId}] chat from ${from} [${room}]: ${text.slice(0, 80)}`);
+
+  // 电源意图：确定性短路，不过 judge（关机不该由小脑裁量）
+  if (powerHost) {
+    const action = matchPowerIntent(text, powerHost);
+    if (action) {
+      console.log(`[${agentId}] power intent: ${action}`);
+      const result = await powerExecute(powerHost, action).catch((err) => `电源操作失败: ${String(err)}`);
+      await speak(room, result, extractContext(p)).catch((err) => console.log(`[${agentId}] speak failed: ${String(err).slice(0, 120)}`));
+      return;
+    }
+  }
 
   // Agent messages are judgeable now — the registry's lapping gate bounds
   // inter-agent exchanges to ~1 message per agent per round, so no loop guard
