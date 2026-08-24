@@ -1,0 +1,33 @@
+# Trusted Publishing (OIDC) — no npm tokens, no OTP.
+# npm 侧配置：package settings → Trusted Publisher → GitHub Actions
+#   org/user: RokiRan, repo: 0xAgent, workflow: publish.yml
+# 触发：git tag v0.x.y && git push --tags
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  id-token: write # OIDC，trusted publishing 必需
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24' # 自带 npm >= 11.5.1（OIDC 交换所需）
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - run: npm ci
+      - run: npm run build --if-present
+      - run: npm test
+
+      - run: npm publish --provenance --access public

@@ -1,5 +1,5 @@
 {
-  "name": "agent-harness",
+  "name": "0xagent",
   "version": "0.1.0",
   "description": "Lightweight, plugin-based AI Agent framework for Node.js. Everything is a plugin.",
   "type": "module",
@@ -7,6 +7,7 @@
   "types": "dist/harness.d.ts",
   "files": [
     "dist",
+    "public",
     "README.md",
     "LICENSE"
   ],
@@ -25,23 +26,19 @@
     "typecheck": "tsc && tsc -p test/tsconfig.json"
   },
   "keywords": [
-    "agent",
     "ai",
+    "agent",
     "llm",
-    "openai",
-    "minimax",
+    "multi-agent",
     "plugin",
-    "framework",
-    "typescript",
-    "react",
-    "tool-calling",
-    "multi-agent"
+    "mcp",
+    "coordination"
   ],
-  "author": "",
+  "author": "Roki Ran <ranxiaojing7096@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/RokiRan/0xAgent.git"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -62,5 +59,13 @@
     "playwright": "^1.62.1",
     "tsx": "^4.0.0",
     "typescript": "^5.4.0"
-  }
+  },
+  "bin": {
+    "agent-harness": "dist/cli.js",
+    "agent-harness-v2": "dist/cli-v2.js",
+    "agent-harness-server": "dist/server.js",
+    "agent-harness-registry": "dist/registry-server.js",
+    "bus-agent": "dist/bus-agent.js"
+  },
+  "prepublishOnly": "npm run build && npm test"
 }
