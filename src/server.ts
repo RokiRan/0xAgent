@@ -185,8 +185,9 @@ if (REGISTRY_URL && harness.server) {
     const id = param(req, 'taskId');
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
-      flushFocus();
-      return createResponse(req.id, { task: taskBoard.approve(id) });
+      const task = taskBoard.approve(id);
+      flushFocus(); // after mutation: window must be closed before probing
+      return createResponse(req.id, { task });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
@@ -196,8 +197,9 @@ if (REGISTRY_URL && harness.server) {
     const note = param(req, 'note') ?? '未说明原因';
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
-      flushFocus();
-      return createResponse(req.id, { task: taskBoard.returnTask(id, note) });
+      const task = taskBoard.returnTask(id, note);
+      flushFocus(); // after mutation: window must be closed before probing
+      return createResponse(req.id, { task });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
@@ -207,8 +209,9 @@ if (REGISTRY_URL && harness.server) {
     const adr = param(req, 'adr') ?? '';
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
-      flushFocus();
-      return createResponse(req.id, { task: taskBoard.cancel(id, adr) });
+      const task = taskBoard.cancel(id, adr);
+      flushFocus(); // after mutation: window must be closed before probing
+      return createResponse(req.id, { task });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
@@ -218,8 +221,9 @@ if (REGISTRY_URL && harness.server) {
     const evidence = param(req, 'evidence') ?? '';
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
-      flushFocus();
-      return createResponse(req.id, { task: taskBoard.reopen(id, evidence) });
+      const task = taskBoard.reopen(id, evidence);
+      flushFocus(); // after mutation: window must be closed before probing
+      return createResponse(req.id, { task });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
@@ -229,8 +233,9 @@ if (REGISTRY_URL && harness.server) {
     const owner = param(req, 'owner');
     if (!id || !owner) return createError(req.id, -32602, 'Missing taskId or owner');
     try {
-      flushFocus();
-      return createResponse(req.id, { task: taskBoard.reassign(id, owner) });
+      const task = taskBoard.reassign(id, owner);
+      flushFocus(); // after mutation: window must be closed before probing
+      return createResponse(req.id, { task });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
@@ -239,8 +244,9 @@ if (REGISTRY_URL && harness.server) {
     const id = param(req, 'taskId');
     if (!id) return createError(req.id, -32602, 'Missing taskId');
     try {
-      flushFocus();
-      return createResponse(req.id, { task: taskBoard.confirm(id) });
+      const task = taskBoard.confirm(id);
+      flushFocus(); // after mutation: window must be closed before probing
+      return createResponse(req.id, { task });
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
