@@ -626,6 +626,10 @@
     .input-box button:hover { background: var(--accent-hover); }
     .input-box button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    /* REGRESSION GUARD: 5158f84 曾误删本规则——20+ 处 classList.toggle('hidden')
+       全部失效，审批弹窗/任务面板恒显且按钮静默无效。删除前全局搜 classList。 */
+    .hidden { display: none !important; }
+
     /* Approval Modal */
     .modal-overlay {
       position: fixed;
