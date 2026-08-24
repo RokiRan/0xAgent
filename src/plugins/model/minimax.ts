@@ -12,6 +12,8 @@ export interface MiniMaxConfig {
   baseUrl?: string;
   model?: string;
   temperature?: number;
+  /** Request timeout in ms — a stalled LLM connection must not hang the agent loop forever. Default 60s. */
+  timeoutMs?: number;
 }
 
 export class MiniMaxProvider implements ModelProvider {
@@ -22,6 +24,7 @@ export class MiniMaxProvider implements ModelProvider {
       baseUrl: 'https://api.minimaxi.com/v1',
       model: 'MiniMax-M3',
       temperature: 0.7,
+      timeoutMs: 60000,
       ...config,
     };
   }
@@ -66,6 +69,7 @@ export class MiniMaxProvider implements ModelProvider {
         'Authorization': `Bearer ${this.config.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(this.config.timeoutMs),
     });
 
     if (!res.ok) {
