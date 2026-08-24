@@ -40,7 +40,7 @@ Agent Harness 是一个受 [DeepSeek Harness](https://github.com/deepseek-ai/awe
 | **会话管理** | Item/Turn/Thread 原语 | ✅ | Codex-inspired |
 | | 内存存储 | ✅ | 开发调试 |
 | | SQLite 持久化 | ✅ | ACID + 搜索 + Fork |
-| | 向量记忆 | ✅ | RAG 检索历史上下文 |
+| | 向量记忆 | ✅ | RAG 检索历史上下文（按 thread 隔离，跨会话检索走显式 API） |
 | | 上下文压缩 | ✅ | 阈值触发 + 摘要 |
 | **通信协议** | Agent Bus (内存) | ✅ | 同进程通信 |
 | | Agent Bus (HTTP) | ✅ | P2P / Registry 中继 / 渠道隔离 |
@@ -49,6 +49,7 @@ Agent Harness 是一个受 [DeepSeek Harness](https://github.com/deepseek-ai/awe
 | | 任务板 | ✅ | Task/Lease/评分重派/验收/ADR |
 | | 决策板 | ✅ | quorum/timebox/anti-reopen/结构化升级 |
 | | 承诺与依赖 | ✅ | promise 确认入图、阻塞驱动催办 |
+| | Focus window | ✅ | in_progress 租约=深度工作期，只放行直聊/关键路径催办，其余批量摘要补发 |
 | | MCP Server | ✅ | 对外暴露工具 |
 | | MCP Client | ✅ | 调用外部 MCP 工具 |
 | | WebSocket | ✅ | 实时双向通信 |
@@ -216,7 +217,8 @@ const memory = new ThreadMemory();
 // 自动索引
 memory.indexThread(thread);
 
-// 检索相关上下文
+// 检索相关上下文（可选 threadId 限定会话范围；
+// agent 对话轮内自动按当前 thread 隔离，防跨会话泄漏）
 const context = memory.getRelevantContext("帮我优化那个函数");
 // 返回: "Relevant previous context: [assistant]: ..."
 ```
@@ -375,8 +377,9 @@ const summary = await scheduler.mapReduce(
 ### 聊天室（Web UI）
 
 - 房间 = 渠道；侧边栏创建/切换，成员徽章实时显示
-- **@ 点名**：request/response 强制应答；**不 @**：广播 + 各 agent 自主判断（judge，fail-closed），反附和规则防互吹
-- agent 可见房间最近 10 条消息（context 注入），能真正互评、收敛共识
+- **@ 点名**：request/response 强制应答；**不 @**：逐成员 relay + 各 agent 自主判断（judge，fail-closed），反附和规则防互吹
+- agent 上下文按 token 预算装配（`BUS_CONTEXT_TOKENS`，默认 3000，字符/2 估算），超预算省略显式报数、单条超长带截断标记——agent 知道记录不完整
+- **Focus window**：agent 持有 `in_progress` 租约时房间消息进个人摘要队列（cap 50），窗口结束（任务流转/租约回收/30s 巡检）一次性补发；@ 直聊与关键路径催办永不拦截
 - agent 回复带思考链折叠块 + 耗时，Markdown 渲染（DOMPurify 消毒）
 
 ### 任务板（Task/Contract + Lease）
