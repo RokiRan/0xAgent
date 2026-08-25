@@ -315,6 +315,40 @@ test('getAgentConfigs: 单 agent 超时 → 该行 error；其他成员不受影
   await gateway.disconnect();
 });
 
+// 设置页实测痛点：串行扇出 N 成员 × 超时 = 面板 loading 近一分钟。
+// 并行后总耗时 ≈ 单成员耗时上限，与成员数无关。
+test('getAgentConfigs: 多成员并行扇出，总耗时与成员数无关', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  for (const id of ['p1', 'p2', 'p3', 'p4']) await joinChannel(reg.url, 'test-room', id);
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 500,
+    store: { insert: () => {}, load: () => [] },
+  });
+  await gateway.createRoom('test-room');
+
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  const original = gw.bus.request.bind(gw.bus);
+  gw.bus.request = (to, payload) => {
+    if (isConfigGet(payload)) {
+      // 每个成员都慢 250ms：串行 ≥1s，并行 ≈250ms。
+      return new Promise((resolve) => setTimeout(
+        () => resolve({ kind: 'config', agent: to, host: 'h', persona: '', model: 'm', modelSmall: 's', channel: 'c' }),
+        250,
+      ));
+    }
+    return original(to, payload);
+  };
+
+  const started = Date.now();
+  const rows = await gateway.getAgentConfigs('test-room');
+  const elapsed = Date.now() - started;
+  assert.equal(rows.length, 4);
+  assert.ok(rows.every((r) => r.config && r.error === null), '四行全部成功');
+  assert.ok(elapsed < 750, `并行总耗时 ${elapsed}ms 应远低于串行下限 1000ms`);
+  await gateway.disconnect();
+});
+
 
 // 空房间（含 self 之外 0 成员）→ 空数组，不发任何 request
 test('getAgentConfigs: 房间无其他成员 → 空数组', async (t) => {

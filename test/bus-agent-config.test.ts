@@ -339,6 +339,22 @@ test('持久化往返: writePersisted → readPersisted 等价（容错读取垃
   } finally { cleanFixture(fx); }
 });
 
+test('writePersisted 覆盖前留 .bak：误写可用上一版恢复', () => {
+  const fx = withDiskCapture(mkCtx());
+  try {
+    writePersisted(fx.filePath, { persona: '原始-persona', modelSmall: 'B' });
+    writePersisted(fx.filePath, { persona: '误写-persona', modelSmall: 'B' });
+    // 主文件是新值，.bak 是上一版
+    assert.equal(readPersisted(fx.filePath).persona, '误写-persona');
+    const bak = JSON.parse(fs.readFileSync(`${fx.filePath}.bak`, 'utf8')) as BusAgentPersisted;
+    assert.equal(bak.persona, '原始-persona');
+    // 首写（无旧文件）不产生 .bak 也不炸
+    const fresh = path.join(fx.dir, 'fresh.json');
+    writePersisted(fresh, { persona: 'X' });
+    assert.equal(fs.existsSync(`${fresh}.bak`), false);
+  } finally { cleanFixture(fx); }
+});
+
 test('BUS_CONFIG_ALLOWED_KEYS 严格只列 persona + modelSmall（冻结允许键）', () => {
   assert.deepEqual([...BUS_CONFIG_ALLOWED_KEYS].sort(), ['modelSmall', 'persona']);
 });

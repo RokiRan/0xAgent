@@ -1186,15 +1186,28 @@
     // ── JSON-RPC helpers ──
     function rpc(method, params = {}) {
       const id = ++messageId;
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
+        // 30s 超时：服务端不回（agent 扇出慢/断链）时必须有终态，
+        // 否则设置页等 UI 永远停在「加载中…」。
+        const timer = setTimeout(() => {
+          ws.removeEventListener('message', handler);
+          reject(new Error(`rpc ${method} timeout after 30s`));
+        }, 30_000);
         const handler = (e) => {
           const msg = JSON.parse(e.data);
           if (msg.id === id) {
+            clearTimeout(timer);
             ws.removeEventListener('message', handler);
             resolve(msg);
           }
         };
         ws.addEventListener('message', handler);
+        if (ws.readyState !== WebSocket.OPEN) {
+          clearTimeout(timer);
+          ws.removeEventListener('message', handler);
+          reject(new Error('连接已断开，正在重连'));
+          return;
+        }
         ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
       });
     }
@@ -1837,10 +1850,15 @@
     }
 
     async function loadGatewayConfig() {
-      const res = await rpc('gateway/config/get');
-      const cfg = res.result ?? {};
-      document.getElementById('settingsUserName').value = cfg.userName ?? '';
-      document.getElementById('settingsContextTokens').value = cfg.contextTokens ?? 3000;
+      try {
+        const res = await rpc('gateway/config/get');
+        const cfg = res.result ?? {};
+        document.getElementById('settingsUserName').value = cfg.userName ?? '';
+        document.getElementById('settingsContextTokens').value = cfg.contextTokens ?? 3000;
+      } catch (err) {
+        document.getElementById('settingsGatewayStatus').textContent = `读取失败: ${err.message ?? err}`;
+        document.getElementById('settingsGatewayStatus').className = 'settings-status err';
+      }
     }
 
     async function loadAgentConfigs() {
@@ -1853,7 +1871,13 @@
       }
       hint.textContent = `房间 #${currentRoom} 的成员配置`;
       list.innerHTML = '<div class="settings-hint">加载中…</div>';
-      const res = await rpc('agent/config/getAll', { room: currentRoom });
+      let res;
+      try {
+        res = await rpc('agent/config/getAll', { room: currentRoom });
+      } catch (err) {
+        list.innerHTML = `<div class="settings-hint">加载失败: ${escapeHtml(err.message ?? String(err))}</div>`;
+        return;
+      }
       const agents = res.result?.agents ?? [];
       list.innerHTML = '';
       if (agents.length === 0) {
@@ -1905,11 +1929,19 @@
         status.className = 'settings-status';
         const personaEl = card.querySelector('[data-role="persona"]');
         const modelSmallEl = card.querySelector('[data-role="modelSmall"]');
-        const r = await rpc('agent/config/set', {
-          room: currentRoom,
-          target: a.agentId,
-          patch: { persona: personaEl.value, modelSmall: modelSmallEl.value },
-        });
+        let r;
+        try {
+          r = await rpc('agent/config/set', {
+            room: currentRoom,
+            target: a.agentId,
+            patch: { persona: personaEl.value, modelSmall: modelSmallEl.value },
+          });
+        } catch (err) {
+          saveBtn.disabled = false;
+          status.textContent = `失败: ${err.message ?? err}`;
+          status.className = 'settings-status err';
+          return;
+        }
         saveBtn.disabled = false;
         if (r.error) {
           status.textContent = `失败: ${r.error.message}`;
@@ -1941,10 +1973,18 @@
       btn.disabled = true;
       status.textContent = '';
       status.className = 'settings-status';
-      const r = await rpc('gateway/config/set', {
-        userName: userName || undefined,
-        contextTokens: Number.isFinite(contextTokens) ? contextTokens : undefined,
-      });
+      let r;
+      try {
+        r = await rpc('gateway/config/set', {
+          userName: userName || undefined,
+          contextTokens: Number.isFinite(contextTokens) ? contextTokens : undefined,
+        });
+      } catch (err) {
+        btn.disabled = false;
+        status.textContent = `失败: ${err.message ?? err}`;
+        status.className = 'settings-status err';
+        return;
+      }
       btn.disabled = false;
       if (r.error) {
         status.textContent = `失败: ${r.error.message}`;

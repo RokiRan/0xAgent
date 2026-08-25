@@ -304,8 +304,10 @@ export class BusGateway {
   }
 
   /**
-   * Fan out `kind:'config' action:'get'` to every room member (10s timeout per
-   * agent). One member failing does NOT poison the rest — the row carries
+   * Fan out `kind:'config' action:'get'` to every room member in parallel
+   * (10s timeout per agent). Serial fanout made the settings page wait
+   * N×10s when several members were offline — parallel caps total at ~10s.
+   * One member failing does NOT poison the rest — the row carries
    * `error` so the UI can still show other agents. Online status uses the
    * cached lastSeen (PresenceAgent's same 60s window); null = unknown → offline.
    * Self is excluded — gateway holds no config itself.
@@ -313,8 +315,7 @@ export class BusGateway {
   async getAgentConfigs(room: string): Promise<AgentConfigEntry[]> {
     const members = await this.listMembers(room);
     const targets = members.filter((m) => m !== this.agentId);
-    const rows: AgentConfigEntry[] = [];
-    for (const agentId of targets) {
+    return Promise.all(targets.map(async (agentId): Promise<AgentConfigEntry> => {
       const lastSeen = this.getAgentLastSeen(agentId);
       const online = lastSeen !== null && Date.now() - lastSeen < BusGateway.ONLINE_WINDOW_MS;
       let config: AgentConfigReply | null = null;
@@ -325,9 +326,8 @@ export class BusGateway {
       } catch (err) {
         error = String(err instanceof Error ? err.message : err);
       }
-      rows.push({ agentId, online, config, error });
-    }
-    return rows;
+      return { agentId, online, config, error };
+    }));
   }
 
   /**

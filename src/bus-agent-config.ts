@@ -82,9 +82,16 @@ export function readPersisted(filePath: string): BusAgentPersisted {
   }
 }
 
-/** Persist with mkdir -p semantics.  Throws on disk failure (caller decides policy). */
+/** Persist with mkdir -p semantics.  Throws on disk failure (caller decides policy).
+ *  Keeps the previous content in `<file>.bak` — a bad `set` overwrite (or an
+ *  accidental UI probe) is recoverable without filesystem snapshots. */
 export function writePersisted(filePath: string, data: BusAgentPersisted): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  try {
+    if (fs.existsSync(filePath)) fs.copyFileSync(filePath, `${filePath}.bak`);
+  } catch {
+    // 备份失败不阻断主写——主写失败才会 throw。
+  }
   fs.writeFileSync(filePath, JSON.stringify(data), 'utf8');
 }
 
