@@ -307,9 +307,11 @@ export class BusGateway {
    * Fan out `kind:'config' action:'get'` to every room member in parallel
    * (10s timeout per agent). Serial fanout made the settings page wait
    * N×10s when several members were offline — parallel caps total at ~10s.
-   * One member failing does NOT poison the rest — the row carries
-   * `error` so the UI can still show other agents. Online status uses the
-   * cached lastSeen (PresenceAgent's same 60s window); null = unknown → offline.
+   * Members with proven-stale lastSeen (presence sweep evidence) are skipped
+   * outright: a 10s timeout in exchange for a certainly-absent reply is waste.
+   * lastSeen=null (sweep hasn't covered the agent yet) still gets queried so
+   * cold-start doesn't under-report. One member failing does NOT poison the
+   * rest — the row carries `error` so the UI can still show other agents.
    * Self is excluded — gateway holds no config itself.
    */
   async getAgentConfigs(room: string): Promise<AgentConfigEntry[]> {
@@ -318,6 +320,9 @@ export class BusGateway {
     return Promise.all(targets.map(async (agentId): Promise<AgentConfigEntry> => {
       const lastSeen = this.getAgentLastSeen(agentId);
       const online = lastSeen !== null && Date.now() - lastSeen < BusGateway.ONLINE_WINDOW_MS;
+      if (lastSeen !== null && !online) {
+        return { agentId, online: false, config: null, error: null };
+      }
       let config: AgentConfigReply | null = null;
       let error: string | null = null;
       try {

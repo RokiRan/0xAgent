@@ -349,6 +349,47 @@ test('getAgentConfigs: 多成员并行扇出，总耗时与成员数无关', asy
   await gateway.disconnect();
 });
 
+// 用户契约：离线成员不拉取。stale lastSeen = 确证离线 → 跳过 request（零耗时、无 error），
+// 只有在线/未知成员才发 config/get。
+test('getAgentConfigs: 确证离线（stale lastSeen）的成员跳过 request，不烧超时', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'stale-agent');
+  await joinChannel(reg.url, 'test-room', 'live-agent');
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 200,
+    store: { insert: () => {}, load: () => [] },
+  });
+  await gateway.createRoom('test-room');
+
+  // 直接种 presence 缓存：stale-agent 两分钟前最后出现（> 60s 窗口），live-agent 刚出现。
+  const seen = gateway as unknown as { agentsLastSeen: Map<string, number> };
+  seen.agentsLastSeen.set('stale-agent', Date.now() - 120_000);
+  seen.agentsLastSeen.set('live-agent', Date.now());
+
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  const original = gw.bus.request.bind(gw.bus);
+  const queried: string[] = [];
+  gw.bus.request = (to, payload) => {
+    if (isConfigGet(payload)) {
+      queried.push(String(to));
+      return Promise.resolve({ kind: 'config', agent: to, host: 'h', persona: 'p', model: 'm', modelSmall: 's', channel: 'c' });
+    }
+    return original(to, payload);
+  };
+
+  const rows = await gateway.getAgentConfigs('test-room');
+  const stale = rows.find((r) => r.agentId === 'stale-agent');
+  const live = rows.find((r) => r.agentId === 'live-agent');
+  if (!stale || !live) throw new Error('expected both rows');
+  assert.deepEqual(queried, ['live-agent'], 'stale 成员不发 request');
+  assert.equal(stale.online, false);
+  assert.equal(stale.config, null);
+  assert.equal(stale.error, null, '跳过的离线行不是错误态');
+  assert.ok(live.config && live.error === null);
+  await gateway.disconnect();
+});
+
 
 // 空房间（含 self 之外 0 成员）→ 空数组，不发任何 request
 test('getAgentConfigs: 房间无其他成员 → 空数组', async (t) => {

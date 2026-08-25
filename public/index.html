@@ -1905,6 +1905,7 @@
           <span class="agent-host">@ ${escapeHtml(host)}</span>
         </div>
         ${hasError ? `<div class="error-msg">配置读取失败: ${escapeHtml(a.error ?? '')}</div>` : ''}
+        ${isOffline ? '<div class="settings-hint">离线，未拉取配置</div>' : ''}
         <div class="settings-row">
           <label>persona</label>
           <textarea data-role="persona" rows="2">${escapeHtml(persona)}</textarea>
@@ -1923,6 +1924,11 @@
       if (isOffline) card.classList.add('offline');
       const saveBtn = card.querySelector('[data-role="save"]');
       const status = card.querySelector('[data-role="status"]');
+      // 离线 agent 的 set 必然 10s 超时失败——直接禁用，别让用户等一个注定的失败。
+      if (isOffline) {
+        saveBtn.disabled = true;
+        saveBtn.title = 'agent 离线，无法保存';
+      }
       saveBtn.onclick = async () => {
         saveBtn.disabled = true;
         status.textContent = '';
