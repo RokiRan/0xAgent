@@ -575,6 +575,102 @@ test('sendChat 连续性: continuityMs=0 关闭路由', async (t) => {
   await gateway.disconnect();
 });
 
+// ============================================================
+// Agent 互调转发：直连应答里的 @mention 由 gateway 补一跳（链 cap 防 ping-pong）
+// ============================================================
+
+// 命中：agent-a 应答里 @agent-b → agent-b 收到 request（from=agent-a, human=false），应答落房间
+test('agent 互调: 直连应答里的 @成员 被转发，来源标记为发言 agent', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-a');
+  await joinChannel(reg.url, 'test-room', 'agent-b');
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 500,
+    store: { insert: () => {}, load: () => [] },
+  });
+  await gateway.createRoom('test-room');
+
+  const calls: { to: unknown; payload: unknown }[] = [];
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  gw.bus.request = (to, payload) => {
+    calls.push({ to, payload });
+    if (to === 'agent-a') return Promise.resolve({ text: '@agent-b 接力，报告你的引擎' });
+    return Promise.resolve({ text: '我是 omp 引擎' });
+  };
+
+  await gateway.sendChat('test-room', '@agent-a 叫一下 agent-b');
+  await waitFor(() => gateway.getHistory('test-room').some((m) => m.kind === 'agent' && m.from === 'agent-b'));
+  assert.equal(calls.length, 2, 'agent-a + 转发 agent-b 各一次 request');
+  const fwd = calls[1];
+  assert.equal(fwd.to, 'agent-b');
+  const p = fwd.payload as { from?: unknown; human?: unknown; text?: unknown };
+  assert.equal(p.from, 'agent-a', '转发来源是发言 agent 而非人类');
+  assert.equal(p.human, false, '互调不伪装成人类消息');
+  assert.ok(String(p.text).includes('@agent-b'), '原话转达');
+  await gateway.disconnect();
+});
+
+// 链 cap：双 agent 互相 @ 最多转 4 跳，超限落 system 消息；人类发言复位后恢复转发
+test('agent 互调: ping-pong 被链 cap 截断，人类发言复位', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-a');
+  await joinChannel(reg.url, 'test-room', 'agent-b');
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 500,
+    store: { insert: () => {}, load: () => [] },
+  });
+  await gateway.createRoom('test-room');
+
+  let calls = 0;
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  gw.bus.request = (to) => {
+    calls++;
+    return Promise.resolve({ text: to === 'agent-a' ? '@agent-b ping' : '@agent-a ping' });
+  };
+
+  await gateway.sendChat('test-room', '@agent-a go');
+  // system 消息在 forwardAgentMentions 的 listMembers 之后发出——出现时异步链已落定，无需等待
+  await waitFor(() =>
+    gateway.getHistory('test-room').some((m) => m.kind === 'system' && m.text.includes('互调链')),
+  );
+  assert.equal(calls, 5, '1 次人类点名 + 4 跳转发后被截断');
+
+  // 人类发言复位链计数 → 转发恢复
+  await gateway.sendChat('test-room', '继续');
+  await gateway.sendChat('test-room', '@agent-a again');
+  await waitFor(() => calls > 5);
+  await gateway.disconnect();
+});
+
+// 排除项：@人类（userName）/ @gateway / @自己 不触发转发；同句里的 @成员 正常转（阳性对照）
+test('agent 互调: @人类/@gateway/@自己 不转发，@成员 正常转', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-a');
+  await joinChannel(reg.url, 'test-room', 'agent-b');
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 500,
+    store: { insert: () => {}, load: () => [] },
+  });
+  await gateway.createRoom('test-room');
+
+  const calls: unknown[] = [];
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  gw.bus.request = (to) => {
+    calls.push(to);
+    if (to === 'agent-a') return Promise.resolve({ text: '@web-user 收到 @web-gateway @agent-a 自圈 @agent-b 接力' });
+    return Promise.resolve({ text: '接力完成' });
+  };
+
+  await gateway.sendChat('test-room', '@agent-a 说一句');
+  // agent-b 应答落房间 = 转发链已走完，排除项此刻若会误转也早已发生——确定性信号
+  await waitFor(() => gateway.getHistory('test-room').some((m) => m.kind === 'agent' && m.from === 'agent-b'));
+  assert.deepEqual(calls, ['agent-a', 'agent-b'], '排除项零转发，只有 agent-b 被圈走');
+  await gateway.disconnect();
+});
+
 function isConfigGet(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false;
   return (payload as { kind?: unknown }).kind === 'config' && (payload as { action?: unknown }).action === 'get';

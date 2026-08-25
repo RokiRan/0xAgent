@@ -125,6 +125,9 @@ export class BusGateway {
   /** Focus-window digests: `${room}:${agentId}` → held messages (cap 50, oldest dropped). */
   private digests = new Map<string, RoomMessage[]>();
   private static readonly DIGEST_CAP = 50;
+  /** Agent 互调链深度（room → 已转发跳数）：人类发言复位，cap 防双 agent ping-pong。 */
+  private mentionChains = new Map<string, number>();
+  private static readonly MENTION_CHAIN_CAP = 4;
   /** 存储降级：连续 3 次写失败 → degraded（聊天 fail-open，标记可观测）。 */
   private storeFailures = 0;
   private degraded = false;
@@ -532,6 +535,7 @@ export class BusGateway {
     const candidates = members.filter((m) => m !== this.agentId);
 
     this.emit({ room, from: this.userName, kind: 'user', text, ts: Date.now() });
+    this.mentionChains.set(room, 0); // 人类发言复位 agent 互调链
 
     // Natural boundary: agents whose window ended since last message catch up first.
     await this.flushDigests(room);
@@ -594,22 +598,56 @@ export class BusGateway {
     return null;
   }
 
-  /** 直连一个 agent（@mention / 连续性共用）：异步 request，应答/错误落房间。 */
-  private directChat(target: string, room: string, text: string, context: string[]): void {
+  /** 直连一个 agent（@mention / 连续性 / 互调转发共用）：异步 request，应答/错误落房间。 */
+  private directChat(
+    target: string,
+    room: string,
+    text: string,
+    context: string[],
+    opts: { from?: string; human?: boolean } = {},
+  ): void {
+    const from = opts.from ?? this.userName;
+    const human = opts.human ?? true;
     this.bus
-      .request(target, { kind: 'chat', room, from: this.userName, human: true, text, context }, this.requestTimeoutMs)
+      .request(target, { kind: 'chat', room, from, human, text, context }, this.requestTimeoutMs)
       .then((res) => {
-        this.emit({
-          room,
-          from: target,
-          kind: 'agent',
-          text: this.extractReplyText(res),
-          ts: Date.now(),
-        });
+        const replyText = this.extractReplyText(res);
+        this.emit({ room, from: target, kind: 'agent', text: replyText, ts: Date.now() });
+        // Agent 应答里的 @mention 补转发：直连应答只落房间历史，被圈者收不到。
+        void this.forwardAgentMentions(room, target, replyText).catch((err) =>
+          console.error('[bus-gateway] mention forward failed:', err),
+        );
       })
       .catch((err) => {
         this.emit({ room, from: target, kind: 'system', text: `请求失败: ${String(err)}`, ts: Date.now() });
       });
+  }
+
+  /**
+   * Agent 应答里的 @mention 转发（gateway 是房间权威，补 request/response 断掉的一跳）。
+   * 广播插嘴不走这里——registry 已 fan-out 给全员。只转给房间成员；
+   * 排除发言者自己 / gateway / 人类（userName）。链深 cap 防双 agent ping-pong，
+   * 超限落 system 消息让人类接管；人类下次发言复位计数。
+   */
+  private async forwardAgentMentions(room: string, from: string, text: string): Promise<void> {
+    const mentions = [...new Set([...text.matchAll(/@([\w-]+)/g)].map((m) => m[1]))].filter(
+      (m) => m !== from && m !== this.agentId && m !== this.userName,
+    );
+    if (mentions.length === 0) return;
+    const members = await this.listMembers(room);
+    const targets = mentions.filter((m) => members.includes(m));
+    if (targets.length === 0) return;
+    const depth = this.mentionChains.get(room) ?? 0;
+    if (depth >= BusGateway.MENTION_CHAIN_CAP) {
+      this.postSystemMessage(
+        room,
+        `agent 互调链超过 ${BusGateway.MENTION_CHAIN_CAP} 跳（${from} → ${targets.join('/')}），已截断——请直接 @ 目标 agent`,
+      );
+      return;
+    }
+    this.mentionChains.set(room, depth + 1);
+    const context = this.buildContext(room);
+    for (const t of targets) this.directChat(t, room, text, context, { from, human: false });
   }
 
   private onBusEvent(msg: BusMessage): void {
