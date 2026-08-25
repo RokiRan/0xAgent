@@ -2002,6 +2002,12 @@
         status.className = 'settings-status err';
         return;
       }
+      // 回写服务端实际生效值：超界被裁剪/非法被丢弃时，输入框立即显示真相，
+      // 杜绝「显示已保存但刷新后变样」的假象。
+      if (r.result.applied) {
+        document.getElementById('settingsUserName').value = r.result.applied.userName ?? '';
+        document.getElementById('settingsContextTokens').value = r.result.applied.contextTokens ?? '';
+      }
       btn.classList.add('saved');
       btn.textContent = '✓';
       status.textContent = '已保存';

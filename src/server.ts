@@ -158,7 +158,9 @@ if (REGISTRY_URL && harness.server) {
     // 所有 agent 回复 403 静默消失。删这行 = 复现该事故。
     channels: (process.env.BUS_CHANNELS ?? 'team').split(',').filter(Boolean),
     contextTokens: Number.isFinite(parsedContextTokens) && parsedContextTokens > 0
-      ? parsedContextTokens
+      // DB 值与热更路径同区间（applyGatewayConfig 裁剪 [500,20000]）；
+      // 防历史遗留的未裁剪落盘值在重启后漂移。
+      ? Math.min(20_000, Math.max(500, Math.round(parsedContextTokens)))
       : Number(process.env.BUS_CONTEXT_TOKENS) || 3000,
     // Lazy closure — taskBoard is constructed below but only called at chat time.
     isFocused: (agentId, room) => taskBoard.ownersInFocus(room).includes(agentId),
@@ -556,14 +558,18 @@ if (REGISTRY_URL && harness.server) {
     if ('contextTokens' in patch && (typeof patch.contextTokens !== 'number' || !Number.isFinite(patch.contextTokens))) {
       return createError(req.id, -32602, 'contextTokens must be a finite number');
     }
+    // 先应用（含裁剪/非法值丢弃），再把生效值落盘——写裁剪前原值会导致
+    // 重启后 constructor（不裁剪）与热更（裁剪）读出不一致。
+    busGateway!.applyGatewayConfig(patch);
+    const applied = busGateway!.getGatewayConfig();
     try {
-      if (typeof patch.userName === 'string') saveSetting.run('userName', patch.userName);
-      if (typeof patch.contextTokens === 'number') saveSetting.run('contextTokens', String(patch.contextTokens));
+      if (typeof patch.userName === 'string') saveSetting.run('userName', applied.userName);
+      if (typeof patch.contextTokens === 'number') saveSetting.run('contextTokens', String(applied.contextTokens));
     } catch (err) {
       return createError(req.id, -32000, String(err instanceof Error ? err.message : err));
     }
-    busGateway!.applyGatewayConfig(patch);
-    return createResponse(req.id, { ok: true });
+    // 回读真实生效值：UI 必须显示落盘真相，而不是输入框里被吞掉的值。
+    return createResponse(req.id, { ok: true, applied });
   });
 
   // Metrics: local board counters + remote registry gate counters
