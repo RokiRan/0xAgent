@@ -192,21 +192,33 @@ export class McpServer {
 // ── MCP Client ──
 // Connects to external MCP servers and exposes their tools as Harness tools
 
+import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import type { Writable } from 'node:stream';
+
 export interface McpClientConfig {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Per-request timeout in ms (default 30000). */
+  requestTimeoutMs?: number;
   // Or connect via SSE
   url?: string;
 }
 
 export class McpClient {
-  private server?: McpServer;
   private tools: McpTool[] = [];
   private requestId = 0;
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  private stdin?: Writable;
+  private child?: ChildProcess;
+  private buffer = '';
+  /** Per-request timeout; a silent server must not hang the caller forever. */
+  private requestTimeoutMs: number;
 
-  constructor(private config: McpClientConfig) {}
+  constructor(private config: McpClientConfig) {
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 30000;
+  }
 
   async connect(): Promise<void> {
     if (this.config.command) {
@@ -219,44 +231,70 @@ export class McpClient {
   }
 
   private async connectStdio(): Promise<void> {
-    const { spawn } = await import('child_process');
-
     const child = spawn(this.config.command!, this.config.args ?? [], {
       env: { ...process.env, ...this.config.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.stdin = child.stdin ?? undefined;
 
+    // Newline-delimited JSON framing: a data chunk is NOT guaranteed to
+    // align with message boundaries — buffer and split on '\n'.
     child.stdout?.on('data', (data: Buffer) => {
-      try {
-        const msg = JSON.parse(data.toString().trim()) as McpJsonRpcMessage;
-        if (msg.id !== undefined && this.pending.has(Number(msg.id))) {
-          const { resolve } = this.pending.get(Number(msg.id))!;
-          this.pending.delete(Number(msg.id));
-          resolve(msg.result ?? msg.error);
+      this.buffer += data.toString();
+      const lines = this.buffer.split('\n');
+      this.buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let msg: McpJsonRpcMessage;
+        try {
+          msg = JSON.parse(line) as McpJsonRpcMessage;
+        } catch {
+          continue; // non-JSON chatter on stdout (server logs etc.)
         }
-      } catch {
-        // Ignore non-JSON output
+        if (msg.id === undefined) continue; // notification, no response expected
+        const entry = this.pending.get(Number(msg.id));
+        if (!entry) continue;
+        this.pending.delete(Number(msg.id));
+        clearTimeout(entry.timer);
+        if (msg.error) {
+          entry.reject(new Error(`MCP error ${msg.error.code}: ${msg.error.message}`));
+        } else {
+          entry.resolve(msg.result);
+        }
       }
     });
 
-    // Initialize
-    const initResult = await this.request({
-      jsonrpc: '2.0',
-      id: ++this.requestId,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2024-11-05',
-        capabilities: {},
-        clientInfo: { name: 'agent-harness', version: '0.1.0' },
-      },
-    });
+    // If the server dies, every in-flight request must fail fast.
+    const failAll = (reason: string) => {
+      for (const [, entry] of this.pending) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error(reason));
+      }
+      this.pending.clear();
+      this.stdin = undefined;
+    };
+    child.on('exit', (code) => failAll(`MCP server exited (code ${code})`));
+    child.on('error', (err) => failAll(`MCP server error: ${String(err)}`));
 
-    if ((initResult as Record<string, unknown>)?.error) {
-      throw new Error(`MCP init failed: ${JSON.stringify(initResult)}`);
+    // Initialize
+    try {
+      await this.request({
+        jsonrpc: '2.0',
+        id: ++this.requestId,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'agent-harness', version: '0.1.0' },
+        },
+      });
+    } catch (err) {
+      child.kill();
+      throw new Error(`MCP init failed: ${String(err)}`);
     }
 
     // Send initialized notification
-    child.stdin?.write(JSON.stringify({
+    this.stdin?.write(JSON.stringify({
       jsonrpc: '2.0',
       method: 'notifications/initialized',
     }) + '\n');
@@ -269,6 +307,7 @@ export class McpClient {
     }) as { tools?: McpTool[] };
 
     this.tools = toolsResult?.tools ?? [];
+    this.child = child;
   }
 
   private async connectSse(): Promise<void> {
@@ -277,10 +316,19 @@ export class McpClient {
   }
 
   private async request(msg: McpJsonRpcMessage): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      this.pending.set(Number(msg.id!), { resolve, reject });
-      // Would write to transport here
-    });
+    const stdin = this.stdin;
+    if (!stdin) {
+      throw new Error('MCP client is not connected (no transport to write to)');
+    }
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+    const id = Number(msg.id!);
+    const timer = setTimeout(() => {
+      this.pending.delete(id);
+      reject(new Error(`MCP request timed out after ${this.requestTimeoutMs}ms (method ${msg.method})`));
+    }, this.requestTimeoutMs);
+    this.pending.set(id, { resolve, reject, timer });
+    stdin.write(JSON.stringify(msg) + '\n');
+    return promise;
   }
 
   getTools(): McpTool[] {
@@ -303,7 +351,14 @@ export class McpClient {
   }
 
   disconnect(): void {
-    // Cleanup
+    this.child?.kill();
+    this.child = undefined;
+    this.stdin = undefined;
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error('MCP client disconnected'));
+    }
+    this.pending.clear();
   }
 }
 

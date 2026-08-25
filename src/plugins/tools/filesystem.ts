@@ -4,8 +4,9 @@
 // ============================================================
 
 import { Plugin, PluginContext } from '../../core/plugin.js';
-import { Tool, ToolRegistry } from './interface.js';
-import { readFile, writeFile, readdir, mkdir, stat } from 'fs/promises';
+import { Tool } from './interface.js';
+import { ToolRegistryImpl } from './registry.js';
+import { readFile, writeFile, readdir, mkdir } from 'fs/promises';
 import { join, resolve, relative } from 'path';
 
 export interface FSConfig {
@@ -22,7 +23,7 @@ function sanitizePath(root: string, inputPath: string): string {
   return target;
 }
 
-class FilesystemTool implements Tool {
+export class FilesystemTool implements Tool {
   name = 'filesystem';
   description = 'Read, write, list files. Use relative paths from workspace root.';
   parameters = {
@@ -71,22 +72,8 @@ class FilesystemTool implements Tool {
         return { success: true };
       }
       default:
-        throw new Error(`Unknown operation: ${op}`);
+        throw new Error(`Unknown operation: ${op}. Valid operations: read, write, list, mkdir`);
     }
-  }
-}
-
-class ToolRegistryImpl implements ToolRegistry {
-  private tools = new Map<string, Tool>();
-
-  register(tool: Tool): void {
-    this.tools.set(tool.name, tool);
-  }
-  get(name: string): Tool | undefined {
-    return this.tools.get(name);
-  }
-  list(): Tool[] {
-    return Array.from(this.tools.values());
   }
 }
 

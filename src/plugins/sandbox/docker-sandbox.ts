@@ -6,6 +6,7 @@
 
 import { Plugin, PluginContext } from '../../core/plugin.js';
 import { Tool } from '../tools/interface.js';
+import { sandboxPlugin } from './process-sandbox.js';
 import { spawn } from 'child_process';
 import { writeFile, mkdir, rm } from 'fs/promises';
 import { join } from 'path';
@@ -256,7 +257,10 @@ export const dockerSandboxPlugin: Plugin = {
 
     const available = await DockerSandbox.isAvailable();
     if (!available) {
-      console.warn('[sandbox:docker] Docker not available. Skipping Docker sandbox.');
+      // 不静默裸奔：Docker 不可用时降级到进程级沙箱，
+      // 保证 shell/code 工具始终有一层隔离与超时控制。
+      console.warn('[sandbox:docker] Docker not available. Falling back to process sandbox.');
+      await sandboxPlugin.activate(ctx);
       return;
     }
 

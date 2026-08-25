@@ -9,6 +9,7 @@ import { filesystemPlugin } from './plugins/tools/filesystem.js';
 import { sessionPlugin } from './plugins/session/memory.js';
 import { persistencePlugin, PersistenceConfig } from './plugins/session/persistence.js';
 import { reactLoopPlugin, AgentLoopConfig } from './plugins/agent-loop/react-loop.js';
+import { memoryToolPlugin } from './plugins/tools/memory.js';
 import { sandboxPlugin, SandboxConfig } from './plugins/sandbox/process-sandbox.js';
 import { plannerPlugin } from './plugins/planner/task-planner.js';
 import { observabilityPlugin } from './plugins/observability/tracer.js';
@@ -95,6 +96,9 @@ export class HarnessPro {
         await reactLoopPlugin.activate({ ...ctx, config: cfg });
       },
     });
+
+    // 5b. Memory tools (remember/search callable inside the loop)
+    this.kernel.register(memoryToolPlugin);
 
     // 6. Planner
     if (this.config.enablePlanner !== false) {

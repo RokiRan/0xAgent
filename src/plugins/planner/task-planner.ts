@@ -5,6 +5,8 @@
 
 import { Plugin, PluginContext } from '../../core/plugin.js';
 import { ModelProvider, Message } from '../model/interface.js';
+import { ToolRegistry } from '../tools/interface.js';
+import { runToolLoop } from '../agent-loop/tool-loop.js';
 
 export interface SubTask {
   id: string;
@@ -43,9 +45,11 @@ Respond in JSON format:
 
 class LLMPlanner implements Planner {
   private model: ModelProvider;
+  private tools: ToolRegistry;
 
   constructor(ctx: PluginContext) {
     this.model = ctx.services.get('model:provider') as ModelProvider;
+    this.tools = ctx.services.get('tool:registry') as ToolRegistry;
   }
 
   async createPlan(goal: string): Promise<Plan> {
@@ -95,8 +99,14 @@ class LLMPlanner implements Planner {
       // Execute ready tasks (sequential for now, parallel possible)
       for (const task of ready) {
         task.status = 'running';
+        // Downstream tasks see upstream deliverables — a dependency that
+        // carries no result forward is a dependency in name only.
+        const priorResults = plan.tasks
+          .filter(t => t.status === 'completed' && t.result)
+          .map(t => `- [${t.id}] ${t.description}\n  结果: ${t.result}`)
+          .join('\n');
         try {
-          const result = await this.executeTask(task);
+          const result = await this.executeTask(task, priorResults);
           task.result = result;
           task.status = 'completed';
           completed.add(task.id);
@@ -112,21 +122,20 @@ class LLMPlanner implements Planner {
     return plan;
   }
 
-  private async executeTask(task: SubTask): Promise<string> {
-    // Simple execution: treat description as a prompt to the model
+  private async executeTask(task: SubTask, priorResults: string): Promise<string> {
     const messages: Message[] = [
-      { role: 'system', content: 'Execute this task. Use tools if needed. Be concise.' },
-      { role: 'user', content: task.description },
+      { role: 'system', content: '你是子任务执行器。使用可用的工具（filesystem/shell 等）真正完成子任务——该读文件的读文件、该跑命令的跑命令，不要只描述做法。完成后简要报告实际做了什么、关键产出是什么。' },
+      { role: 'user', content: `${priorResults ? `已完成的前置子任务及结果：\n${priorResults}\n\n` : ''}当前子任务：${task.description}` },
     ];
 
-    // In a full implementation, this would invoke the agent loop
-    // For now, return the task description as a simulated result
-    return `Executed: ${task.description}`;
+    const result = await runToolLoop(this.model, this.tools, messages, { maxIterations: 8 });
+    return result.text;
   }
 }
 
 export const plannerPlugin: Plugin = {
   name: 'planner:llm',
+  dependencies: ['tool:filesystem'],
   async activate(ctx: PluginContext) {
     const planner = new LLMPlanner(ctx);
     ctx.services.register('planner', planner);

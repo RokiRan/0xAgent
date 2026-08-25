@@ -1,12 +1,15 @@
 // ============================================================
 // Plugin: ReAct Agent Loop
 // Think -> Act -> Observe -> Repeat
+// Loop core lives in tool-loop.ts; this plugin binds it to
+// kernel services (model / tool registry / session manager).
 // ============================================================
 
 import { Plugin, PluginContext } from '../../core/plugin.js';
-import { ModelProvider, Message, ToolCall } from '../model/interface.js';
-import { ToolRegistry, Tool } from '../tools/interface.js';
-import { Session, SessionManager } from '../session/memory.js';
+import { ModelProvider } from '../model/interface.js';
+import { ToolRegistry } from '../tools/interface.js';
+import { SessionManager } from '../session/memory.js';
+import { runToolLoop } from './tool-loop.js';
 
 const SYSTEM_PROMPT = `You are a helpful assistant with access to tools.
 When you need to perform an action, use a tool call.
@@ -39,53 +42,11 @@ class ReActLoop {
 
     session.add({ role: 'user', content: userInput });
 
-    const toolList = this.tools.list();
-    const schemas = toolList.map(t => ({
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    }));
-
-    for (let i = 0; i < this.maxIterations; i++) {
-      const messages = session.get();
-      const response = await this.model.generate(messages, schemas);
-
-      if (response.content || response.toolCalls) {
-        session.add({
-          role: 'assistant',
-          content: response.content ?? '',
-          toolCalls: response.toolCalls,
-        });
-      }
-
-      if (!response.toolCalls || response.toolCalls.length === 0) {
-        return response.content ?? '(no response)';
-      }
-
-      // Execute tool calls
-      for (const tc of response.toolCalls) {
-        const result = await this.executeTool(tc);
-        session.add({
-          role: 'tool',
-          content: JSON.stringify(result),
-          toolCallId: tc.id,
-        });
-      }
-    }
-
-    return 'Max iterations reached.';
-  }
-
-  private async executeTool(tc: ToolCall): Promise<unknown> {
-    const tool = this.tools.get(tc.name);
-    if (!tool) {
-      return { error: `Tool "${tc.name}" not found` };
-    }
-    try {
-      return await tool.execute(tc.arguments);
-    } catch (err) {
-      return { error: String(err) };
-    }
+    const result = await runToolLoop(this.model, this.tools, session.get(), {
+      maxIterations: this.maxIterations,
+      onMessage: (m) => session.add(m),
+    });
+    return result.text;
   }
 }
 

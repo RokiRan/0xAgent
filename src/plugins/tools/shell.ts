@@ -16,7 +16,7 @@ export interface ShellConfig {
   allowedCommands?: string[];
 }
 
-class ShellTool implements Tool {
+export class ShellTool implements Tool {
   name = 'shell';
   description = 'Execute a shell command. Use with care.';
   parameters = {
@@ -40,11 +40,17 @@ class ShellTool implements Tool {
     const command = args.command as string;
     const timeout = (args.timeout ?? this.config.timeout ?? 30000) as number;
 
-    // Simple safety check
-    const dangerous = ['rm -rf /', '> /dev/null', ':(){ :|:& };:'];
-    for (const d of dangerous) {
-      if (command.includes(d)) {
-        throw new Error('Potentially dangerous command blocked');
+    // Destructive/system-wide commands are blocked; the agent gets told
+    // exactly which pattern matched so it can pick a safe alternative.
+    const blocked = [
+      'rm -rf /', 'rm -rf ~', 'rm -rf *', 'rm -rf .',
+      'mkfs', 'dd if=', '> /dev/sd', ':(){ :|:& };:',
+      'shutdown', 'reboot', 'poweroff', 'halt',
+      'useradd', 'userdel',
+    ];
+    for (const b of blocked) {
+      if (command.includes(b)) {
+        throw new Error(`Blocked command pattern "${b}". This shell is for inspection and workspace tasks; destructive or system-wide commands are not allowed.`);
       }
     }
 

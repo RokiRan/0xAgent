@@ -472,7 +472,21 @@ CODING_ENGINE=omp        # 或 claude；不设 = LLM-only 旧行为
 CODING_WORKDIR=/tmp/0xagent-work   # 默认 $TMPDIR/0xagent-work（刻意不落仓库根：引擎持写权限，边界必须显式）
 CODING_TIMEOUT_MS=240000           # 默认 240s（< task-board 5min 派发超时）
 CODING_BIN=/path/to/binary         # 可选，覆盖二进制路径
+
+# 应答/任务工具手（P0：默认开）
+AGENT_TOOLS=off            # 设为 off 回到纯文本单轮旧行为
+AGENT_WORKDIR=/path        # filesystem/shell 工具的工作目录，默认 CODING_WORKDIR 或 /tmp/0xagent-work
+AGENT_LOOP_MAX=6           # 应答路径最大工具轮次（任务路径 +2）
 ```
+
+- 开启后 reply/task 走共享工具循环（`src/plugins/agent-loop/tool-loop.ts`），挂 `filesystem`（限定工作目录）+ `shell`（带危险命令拦截）两个工具，模型自行决定何时真实查/做；不需要工具时零额外调用
+- 循环撞上限时强制一轮无工具总结，不再返回裸 `Max iterations reached.`
+- 工具调用逐条落 journal（`tool: <name> <args>`）
+
+### 记忆与规划（P1）
+
+- `memory_remember` / `memory_search` 两个工具（`src/plugins/tools/memory.ts`）：agent 可在循环里主动写/查长期记忆；V2 server 与 HarnessPro 均已接入，与会话历史共用同一 `ThreadMemory` 存储
+- planner 的 `executeTask` 走真实工具循环（不再是返回描述文字的 stub），前置子任务结果会注入后续任务的上下文
 
 - **omp**：`omp -p --auto-approve --no-session`，本机已装即可用，无 per-call 成本
 - **claude**：`claude -p --output-format json --permission-mode bypassPermissions`，JSON 输出自带 `total_cost_usd` 回传

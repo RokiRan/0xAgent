@@ -172,6 +172,16 @@ export class ThreadMemory {
     }
   }
 
+  // Store a free-form note (agent-initiated recall, not tied to a turn).
+  remember(content: string, metadata?: Record<string, unknown>): void {
+    this.vectorMemory.add(content, {
+      threadId: String(metadata?.threadId ?? ''),
+      turnId: String(metadata?.turnId ?? ''),
+      role: 'note',
+      ...metadata,
+    });
+  }
+
   // Search indexed threads; pass threadId to isolate to one conversation
   // (default is unfiltered for explicit memory/search tooling).
   // Filter runs before the topK slice inside VectorMemory — no over-fetch heuristic.

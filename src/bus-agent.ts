@@ -13,6 +13,7 @@
 
 import os from 'node:os';
 import path from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { AgentBusImpl } from './plugins/agent-bus/bus.js';
 import { HttpTransport } from './plugins/agent-bus/http-transport.js';
 import { MiniMaxProvider } from './plugins/model/minimax.js';
@@ -20,7 +21,11 @@ import { RecordingProvider, httpLedgerSink } from './plugins/model/recording.js'
 import { createEngineFromEnv } from './plugins/engine/index.js';
 import { powerHostFromEnv, matchPowerIntent, powerExecute, PowerAction } from './plugins/power/index.js';
 import { collectAgentCard, AgentCard } from './plugins/agent-bus/agent-card.js';
-import type { ModelProvider } from './plugins/model/interface.js';
+import { runToolLoop } from './plugins/agent-loop/tool-loop.js';
+import { ToolRegistryImpl } from './plugins/tools/registry.js';
+import { FilesystemTool } from './plugins/tools/filesystem.js';
+import { ShellTool } from './plugins/tools/shell.js';
+import type { ModelProvider, Message } from './plugins/model/interface.js';
 import {
   handleConfigRequest,
   readPersisted,
@@ -137,6 +142,21 @@ function buildSmallModel(): ModelProvider | undefined {
   );
 }
 
+// 工具手：回复/任务不再是单轮空谈——挂 filesystem(限定工作目录)+shell，
+// 模型自己决定何时真的去查/去做。AGENT_TOOLS=off 一键回到纯文本模式。
+const agentToolsEnabled = process.env.AGENT_TOOLS !== 'off';
+const agentWorkdir =
+  process.env.AGENT_WORKDIR ?? process.env.CODING_WORKDIR ?? '/tmp/0xagent-work';
+const agentLoopMax = Number(process.env.AGENT_LOOP_MAX ?? 6);
+let agentTools: ToolRegistryImpl | undefined;
+if (agentToolsEnabled) {
+  mkdirSync(agentWorkdir, { recursive: true });
+  agentTools = new ToolRegistryImpl();
+  agentTools.register(new FilesystemTool(agentWorkdir));
+  agentTools.register(new ShellTool({ cwd: agentWorkdir, timeout: 60000 }));
+  console.log(`[${agentId}] agent tools: filesystem+shell (root ${agentWorkdir})`);
+}
+
 // Config protocol ctx (contract §2 §4).  The handler is in
 // bus-agent-config.ts; this ctx is the only bus-agent-side glue:
 // Getters return live values so `get` always reports what's in force;
@@ -205,11 +225,23 @@ function contextBlock(context: string[]): string {
 
 async function answerText(text: string, from: string, context: string[] = []): Promise<string> {
   if (!replyModel) return `${agentId}@${os.hostname()} 收到: ${text}`;
-  const res = await replyModel.generate([
-    { role: 'system', content: `You are agent "${agentId}" running on host "${os.hostname()}", in a group chat.${personaRef.current ? ` 你的专长：${personaRef.current}。` : ''} Answer concisely in Chinese.` },
+  let system = `You are agent "${agentId}" running on host "${os.hostname()}", in a group chat.${personaRef.current ? ` 你的专长：${personaRef.current}。` : ''} Answer concisely in Chinese.`;
+  if (agentTools) {
+    system += ` 你配有工具可以真实查看/操作这台主机：filesystem 限定在工作目录 ${agentWorkdir}，shell 命令也在其中执行。需要真实数据或实际操作时，先用工具核实再基于结果回答，不要凭记忆编造系统状态；做了操作要简述实际结果。`;
+  }
+  const messages: Message[] = [
+    { role: 'system', content: system },
     { role: 'user', content: `${contextBlock(context)}现在 ${from} 说：${text}` },
-  ]);
-  return res.content ?? '';
+  ];
+  if (!agentTools) {
+    const res = await replyModel.generate(messages);
+    return stripThink(res.content ?? '');
+  }
+  const result = await runToolLoop(replyModel, agentTools, messages, {
+    maxIterations: agentLoopMax,
+    onToolCall: (tc) => console.log(`[${agentId}] tool: ${tc.name} ${JSON.stringify(tc.arguments).slice(0, 160)}`),
+  });
+  return stripThink(result.text);
 }
 
 /**
@@ -287,12 +319,25 @@ async function handleTaskRequest(payload: object, reply: (r: unknown) => void): 
       }
       return;
     }
-    const answer = taskModel
-      ? stripThink((await taskModel.generate([
-          { role: 'system', content: `You are agent "${agentId}".${personaRef.current ? ` 你的专长：${personaRef.current}。` : ''} 完成任务并用中文交付。` },
-          { role: 'user', content: prompt },
-        ])).content ?? '')
-      : `${agentId}@${os.hostname()} 无 LLM，无法执行任务`;
+    let answer: string;
+    if (!taskModel) {
+      answer = `${agentId}@${os.hostname()} 无 LLM，无法执行任务`;
+    } else if (agentTools) {
+      // 无编码引擎时的真实执行路径：工具循环代替单轮空谈。
+      const result = await runToolLoop(taskModel, agentTools, [
+        { role: 'system', content: `You are agent "${agentId}".${personaRef.current ? ` 你的专长：${personaRef.current}。` : ''} 你配有 filesystem/shell 工具（工作目录 ${agentWorkdir}），必须真实完成任务而非描述做法：该查的查、该写的写。最后用中文交付，说明实际做了什么、产出了什么。` },
+        { role: 'user', content: prompt },
+      ], {
+        maxIterations: agentLoopMax + 2,
+        onToolCall: (tc) => console.log(`[${agentId}] task tool: ${tc.name} ${JSON.stringify(tc.arguments).slice(0, 160)}`),
+      });
+      answer = stripThink(result.text);
+    } else {
+      answer = stripThink((await taskModel.generate([
+        { role: 'system', content: `You are agent "${agentId}".${personaRef.current ? ` 你的专长：${personaRef.current}。` : ''} 完成任务并用中文交付。` },
+        { role: 'user', content: prompt },
+      ])).content ?? '');
+    }
     reply({ kind: 'task', taskId, action: 'submit', agent: agentId, evidence: answer });
   } catch (err) {
     reply({ kind: 'task', taskId, action: 'failed', agent: agentId, error: String(err) });

@@ -18,6 +18,7 @@ import { ContextCompactor } from '../core/compactor.js';
 import { ThreadMemory } from '../core/vector-memory.js';
 import { ModelProvider, Message, ToolSchema } from '../plugins/model/interface.js';
 import { ToolRegistry } from '../plugins/tools/interface.js';
+import { registerMemoryTools } from '../plugins/tools/memory.js';
 
 export interface AppServerV2Config {
   model: ModelProvider;
@@ -57,6 +58,10 @@ export class AppServerV2 {
 
     if (config.enableMemory !== false) {
       this.memory = new ThreadMemory();
+      // Memory as agent-callable tools: the loop can actively remember /
+      // search instead of relying on passive injection alone. Shares the
+      // same store as turn indexing, so notes and history recall together.
+      registerMemoryTools(config.tools, this.memory);
     }
   }
 
