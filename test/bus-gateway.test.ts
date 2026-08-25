@@ -464,6 +464,117 @@ test('gateway 自身配置: get 反映初值；apply 热更新并裁剪 contextT
   await gateway.disconnect();
 });
 
+// ============================================================
+// 连续性路由：无 @ 追问直连 TTL 内最后发言的 agent（事实判断，不过 judge）
+// ============================================================
+
+// 命中：最后发言的 agent 收到直连 request 并回落房间；其他成员无 relay 事件；
+// 应答刷新窗口，下一句追问仍直连。
+test('sendChat 连续性: TTL 内最后发言者被直连，追问续期，旁人无 relay', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-a');
+  await joinChannel(reg.url, 'test-room', 'agent-b');
+  const seed: RoomMessage[] = [
+    roomMsg('test-room', 'web-user', '@agent-a 查一下配置'),
+    roomMsg('test-room', 'agent-a', '配置如下', 'agent'),
+  ];
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 500,
+    store: { insert: () => {}, load: () => [...seed] },
+  });
+  await gateway.createRoom('test-room');
+
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  const requested: string[] = [];
+  gw.bus.request = (to) => {
+    requested.push(String(to));
+    return Promise.resolve({ text: `reply from ${String(to)}` });
+  };
+
+  const r = await gateway.sendChat('test-room', '再展开说说');
+  assert.deepEqual(r.delivered, ['agent-a'], '无 @ 追问直连最后发言者');
+  await waitFor(() =>
+    gateway.getHistory('test-room').some((m) => m.kind === 'agent' && m.text === 'reply from agent-a'),
+  );
+  assert.deepEqual(requested, ['agent-a'], '只对 agent-a 发 request');
+  assert.equal((await pollMessages(reg.url, 'agent-b')).length, 0, 'agent-b 无 relay 事件');
+
+  // 应答落房间 → 窗口续期：下一句无 @ 仍直连 agent-a
+  const r2 = await gateway.sendChat('test-room', '还有呢');
+  assert.deepEqual(r2.delivered, ['agent-a'], '追问续期');
+  await gateway.disconnect();
+});
+
+// 超时：最后一条 agent 发言早于 TTL → 退回 fan-out relay（judge 路径）
+test('sendChat 连续性: 最后发言超 TTL → 退回全员 fan-out', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-a');
+  await joinChannel(reg.url, 'test-room', 'agent-b');
+  const old = { ...roomMsg('test-room', 'agent-a', '旧发言', 'agent'), ts: Date.now() - 10 * 60_000 };
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 500,
+    continuityMs: 60_000,
+    store: { insert: () => {}, load: () => [old] },
+  });
+  await gateway.createRoom('test-room');
+
+  const r = await gateway.sendChat('test-room', '新话题，大家看看');
+  assert.deepEqual([...r.delivered].sort(), ['agent-a', 'agent-b'], '超时后 fan-out 全员');
+  assert.equal((await pollMessages(reg.url, 'agent-a')).length, 1, 'agent-a 收 relay 事件');
+  assert.equal((await pollMessages(reg.url, 'agent-b')).length, 1, 'agent-b 收 relay 事件');
+  await gateway.disconnect();
+});
+
+// 显式 @ 优先：即使 agent-a 是最后发言者，@agent-b 仍直连 agent-b
+test('sendChat 连续性: 显式 @ 他人覆盖连续性', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-a');
+  await joinChannel(reg.url, 'test-room', 'agent-b');
+  const seed: RoomMessage[] = [roomMsg('test-room', 'agent-a', '我刚才说的', 'agent')];
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], requestTimeoutMs: 500,
+    store: { insert: () => {}, load: () => [...seed] },
+  });
+  await gateway.createRoom('test-room');
+
+  const gw = gateway as unknown as { bus: { request(to: unknown, payload: unknown): Promise<unknown> } };
+  const requested: string[] = [];
+  gw.bus.request = (to) => {
+    requested.push(String(to));
+    return Promise.resolve({ text: 'ok' });
+  };
+
+  const r = await gateway.sendChat('test-room', '@agent-b 你怎么看');
+  assert.deepEqual(r.delivered, ['agent-b'], '@ 覆盖连续性');
+  assert.deepEqual(requested, ['agent-b']);
+  await gateway.disconnect();
+});
+
+// 开关：continuityMs=0 关闭，新鲜发言也照样 fan-out
+test('sendChat 连续性: continuityMs=0 关闭路由', async (t) => {
+  const reg = await bootRegistry();
+  t.after(() => reg.close());
+  await joinChannel(reg.url, 'test-room', 'agent-a');
+  const seed: RoomMessage[] = [roomMsg('test-room', 'agent-a', '刚说完', 'agent')];
+  const gateway = new BusGateway({
+    agentId: 'web-gateway', registryUrl: reg.url, channels: [], continuityMs: 0,
+    // 防回归时直连 request 挂默认 90s 超时拖住进程
+    requestTimeoutMs: 200,
+    store: { insert: () => {}, load: () => [...seed] },
+  });
+  await gateway.createRoom('test-room');
+
+  const r = await gateway.sendChat('test-room', '追问但不路由');
+  assert.deepEqual(r.delivered, ['agent-a'], '走了 relay（成员唯一，delivered 同形）');
+  const msgs = await pollMessages(reg.url, 'agent-a');
+  assert.equal(msgs.length, 1, '是 relay 事件而非直连 request');
+  assert.equal(msgs[0].type, 'event');
+  await gateway.disconnect();
+});
+
 function isConfigGet(payload: unknown): boolean {
   if (!payload || typeof payload !== 'object') return false;
   return (payload as { kind?: unknown }).kind === 'config' && (payload as { action?: unknown }).action === 'get';

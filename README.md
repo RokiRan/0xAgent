@@ -414,6 +414,7 @@ const summary = await scheduler.mapReduce(
 
 - 房间 = 渠道；侧边栏创建/切换，成员徽章实时显示
 - **@ 点名**：request/response 强制应答；**不 @**：逐成员 relay + 各 agent 自主判断（judge，fail-closed），反附和规则防互吹
+- **连续性路由**：无 @ 消息若距「最后发言的 agent」≤ 5 分钟（`continuityMs`），视为对他的追问，走 @ 同款直连（同步应答）——连续对话不必每句都圈；应答自动续期，冷场超时退回 relay+judge，显式 @ 他人即时切换
 - agent 上下文按 token 预算装配（`BUS_CONTEXT_TOKENS`，默认 3000，字符/2 估算），超预算省略显式报数、单条超长带截断标记——agent 知道记录不完整
 - **Focus window**：agent 持有 `in_progress` 租约时房间消息进个人摘要队列（cap 50），窗口结束（任务流转/租约回收/30s 巡检）一次性补发；@ 直聊与关键路径催办永不拦截
 - agent 回复带思考链折叠块 + 耗时，Markdown 渲染（DOMPurify 消毒）
@@ -633,7 +634,7 @@ npm run server
 | `room/list` | - | 房间列表（含成员） |
 | `room/create` | `{ name }` | 创建房间 |
 | `room/history` | `{ room }` | 房间消息历史（SQLite 持久化） |
-| `room/send` | `{ room, text }` | 发言；`@agent` 点名强制应答，否则广播+自主判断 |
+| `room/send` | `{ room, text }` | 发言；`@agent` 点名强制应答；无 @ 且 5 分钟内有 agent 发言 → 连续性直连该 agent；否则广播+自主判断 |
 
 **任务板**
 

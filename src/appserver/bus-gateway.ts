@@ -94,6 +94,12 @@ export interface BusGatewayConfig {
   /** @mention request timeout (ms). Default 90000; tests set it short. */
   requestTimeoutMs?: number;
   /**
+   * 对话连续性窗口（ms）：无 @ 消息路由给「TTL 内最后发言的 agent」
+   * （事实判断，不过 judge）——人在和某个 agent 连续对话时不必每句都圈。
+   * 默认 5 分钟；0 = 关闭，退回纯 fan-out + judge。
+   */
+  continuityMs?: number;
+  /**
    * future-you（cumora §9.2.1）：agent 经 bus request kind:'reminder'
    * 给自己或他人排定时唤醒。直连 relay（非广播），不污染房间 rounds。
    */
@@ -111,6 +117,7 @@ export class BusGateway {
   private isFocused?: (agentId: string, room: string) => boolean;
   private loadPrinciples?: (room: string) => string[];
   private requestTimeoutMs: number;
+  private continuityMs: number;
   private contextTokens: number;
   private loadAgentCards?: () => Promise<string[]>;
   private rosterLines: string[] = [];
@@ -155,6 +162,7 @@ export class BusGateway {
     this.isFocused = config.isFocused;
     this.loadPrinciples = config.loadPrinciples;
     this.requestTimeoutMs = config.requestTimeoutMs ?? 90000;
+    this.continuityMs = config.continuityMs ?? 300_000;
     this.contextTokens = config.contextTokens ?? 3000;
     this.loadAgentCards = config.loadAgentCards;
     // Presence loop defaults to whatever the gateway is joined to; callers can
@@ -533,6 +541,13 @@ export class BusGateway {
     const context = this.buildContext(room);
 
     if (mentions.length === 0) {
+      // 连续性路由（事实判断，不过 judge）：TTL 内最后发言的 agent 视为
+      // 当前对话对象，无 @ 追问直连他——与 @mention 同路径（同步应答）。
+      const cont = this.findContinuity(room);
+      if (cont && candidates.includes(cont)) {
+        this.directChat(cont, room, text, context);
+        return { delivered: [cont] };
+      }
       // Per-member relay (not a channel broadcast) so focused agents can be
       // excluded selectively — a broadcast would reach them via /poll regardless.
       const delivered: string[] = [];
@@ -557,23 +572,44 @@ export class BusGateway {
     }
 
     const targets = candidates.filter((m) => mentions.includes(m));
-    for (const target of targets) {
-      this.bus
-        .request(target, { kind: 'chat', room, from: this.userName, human: true, text, context }, this.requestTimeoutMs)
-        .then((res) => {
-          this.emit({
-            room,
-            from: target,
-            kind: 'agent',
-            text: this.extractReplyText(res),
-            ts: Date.now(),
-          });
-        })
-        .catch((err) => {
-          this.emit({ room, from: target, kind: 'system', text: `请求失败: ${String(err)}`, ts: Date.now() });
-        });
-    }
+    for (const target of targets) this.directChat(target, room, text, context);
     return { delivered: targets };
+  }
+
+  /**
+   * 连续性判定：房间历史里最近一条 agent 消息的发送者，且距今 ≤ TTL。
+   * 单人类房间前提下，其后的 user 消息都是对他的追问；应答本身会刷新
+   * 窗口（连续对话不断续期），静默超时后自动退回 fan-out + judge。
+   * system/digest 不参与（kind 不是 'agent'）。
+   */
+  private findContinuity(room: string): string | null {
+    if (this.continuityMs <= 0) return null;
+    const history = this.getHistory(room);
+    const now = Date.now();
+    for (let i = history.length - 1; i >= 0; i--) {
+      const m = history[i];
+      if (m.kind !== 'agent') continue;
+      return now - m.ts <= this.continuityMs ? m.from : null;
+    }
+    return null;
+  }
+
+  /** 直连一个 agent（@mention / 连续性共用）：异步 request，应答/错误落房间。 */
+  private directChat(target: string, room: string, text: string, context: string[]): void {
+    this.bus
+      .request(target, { kind: 'chat', room, from: this.userName, human: true, text, context }, this.requestTimeoutMs)
+      .then((res) => {
+        this.emit({
+          room,
+          from: target,
+          kind: 'agent',
+          text: this.extractReplyText(res),
+          ts: Date.now(),
+        });
+      })
+      .catch((err) => {
+        this.emit({ room, from: target, kind: 'system', text: `请求失败: ${String(err)}`, ts: Date.now() });
+      });
   }
 
   private onBusEvent(msg: BusMessage): void {
