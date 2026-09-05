@@ -1,0 +1,7 @@
+# 构建产物（build.sh 可完整再生成）
+build/
+bus-agent.apk
+bus-agent.apk.idsig
+
+# libs/x_* 是 build.sh 从 *.aar 幂等解出的中间目录
+libs/x_*/
