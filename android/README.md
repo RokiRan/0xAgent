@@ -12,7 +12,7 @@
 bash android/build.sh    # 产物 android/bus-agent.apk
 ```
 
-管线：aapt2 compile/link（`--extra-packages` 生成库 R、多 `-A` 挂库 assets、`--auto-add-overlay`）→ javac（classpath = android.jar + 全部 classes.jar）→ d8（min-api ≥ 21 自动 multidex）→ zip 塞 classes*.dex + arm64 .so → apksigner。
+管线：aapt2 compile/link（`--extra-packages` 生成库 R、多 `-A` 挂库 assets、`--auto-add-overlay`）→ javac（classpath = android.jar + 全部 classes.jar）→ d8（`--min-api 26`，自动 multidex）→ zip 塞 classes*.dex + arm64 .so → apksigner。
 
 **铁律**：过滤构建输出时必须 `set -o pipefail`，否则编译失败时 grep 照样命中 error 行返回 0，会拿旧 APK 部署。
 
@@ -42,7 +42,7 @@ adb shell settings put secure accessibility_enabled 1
 
 - **日志页**（默认）：深色全屏日志，钉底自动跟随；上翻解除跟随，回到底部恢复
 - **配置面板**：点日志区展开，30s 无操作自动收起；含全部连接参数、启动/停止、电池优化、无障碍入口，以及两个人工测试页（人脸检测、语音识别）
-- **防烧屏（OLED）**：任意界面 30s 无任何触摸 → 盖全黑层（OLED 像素熄灭）；点一下揭开回日志页并重新计时 30s。任何触摸（滚动/输入/点按钮）都会重置计时。黑屏期间 Android 12 的相机/麦克风隐私指示灯仍由系统显示，属正常
+- **防烧屏（OLED）**：日志页/配置面板 30s 无任何触摸 → 盖全黑层（OLED 像素熄灭）；点一下揭开回日志页并重新计时 30s。任何触摸（滚动/输入/点按钮）都会重置计时。仅覆盖 MainActivity；人脸检测、语音识别两个测试页（独立 Activity）无此逻辑。黑屏期间 Android 12 的相机/麦克风隐私指示灯仍由系统显示，属正常
 
 ## 能力
 
