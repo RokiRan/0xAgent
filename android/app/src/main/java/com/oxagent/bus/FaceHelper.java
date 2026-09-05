@@ -64,6 +64,20 @@ public class FaceHelper {
         return fastDetector;
     }
 
+    /** 头部端正（不含眼睛条件）：|Y|<15° |X|<20°。 */
+    public static boolean headStraight(Face f) {
+        return Math.abs(f.getHeadEulerAngleY()) < 15 && Math.abs(f.getHeadEulerAngleX()) < 20;
+    }
+
+    /** 双眼睁开（>0.6，取不到概率时不否决）。 */
+    public static boolean eyesOpen(Face f) {
+        Float le = f.getLeftEyeOpenProbability();
+        Float re = f.getRightEyeOpenProbability();
+        if (le != null && le < 0.6f) return false;
+        if (re != null && re < 0.6f) return false;
+        return true;
+    }
+
     /** 正对镜头判定（唯一阈值源，analyze 与测试页共用）：头部偏转 |Y|<15° |X|<20° 且双眼睁开。 */
     public static boolean lookingAtCamera(Face f) {
         float ey = f.getHeadEulerAngleY(); // 左右转头，0=正对

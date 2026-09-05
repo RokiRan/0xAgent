@@ -51,6 +51,8 @@ public class AgentService extends Service {
     private PowerManager.WakeLock wakeLock;
     private android.net.wifi.WifiManager.WifiLock wifiLock;
     private int pollTick;
+    private SharedPreferences prefs;
+    private SharedPreferences.OnSharedPreferenceChangeListener prefListener;
 
     private String agentId, registry, token, channel, mmKey, mmModel, persona;
     /** operatorLoop 执行中的任务来源频道；send_photo 的播报落点，任务结束清空。 */
@@ -101,6 +103,15 @@ public class AgentService extends Service {
         memory = new MemoryHelper(getFilesDir());
         schedules = new ScheduleStore(getFilesDir());
         instance = this;
+        // 持续注视监听开关：即时生效，不用重启服务（listener 必须强引用持有，SharedPreferences 内部弱引用）
+        prefs = p;
+        prefListener = (sp, key) -> {
+            if (!"gazeListen".equals(key)) return;
+            if ("1".equals(sp.getString("gazeListen", "0"))) GazeListener.start(this);
+            else GazeListener.stop();
+        };
+        p.registerOnSharedPreferenceChangeListener(prefListener);
+        if ("1".equals(p.getString("gazeListen", "0"))) GazeListener.start(this);
         rearmSchedules();
         exec.execute(() -> {
             try {
@@ -127,6 +138,8 @@ public class AgentService extends Service {
     @Override
     public void onDestroy() {
         instance = null;
+        GazeListener.stop();
+        if (prefs != null && prefListener != null) prefs.unregisterOnSharedPreferenceChangeListener(prefListener);
         if (exec != null) exec.shutdownNow();
         if (worker != null) worker.shutdownNow();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();

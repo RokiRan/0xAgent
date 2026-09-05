@@ -38,13 +38,13 @@ public class MainActivity extends Activity {
     private final java.util.Map<String, EditText> inputs = new java.util.HashMap<>();
     private TextView logView;
     private ScrollView logScroll;
+    /** 日志是否钉在底部跟随滚动；用户上翻即解除，回到底部恢复。 */
+    private boolean logFollow = true;
+    private android.widget.Switch gazeSwitch;
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        prefs = getSharedPreferences("cfg", MODE_PRIVATE);
-        // adb 注入配置：am start --es agentId x --es registry y --es token z --es autostart 1
-        Intent seed = getIntent();
+    /** adb 注入配置（am start --es ...），onCreate 与 onNewIntent 共用。 */
+    private void applySeed(Intent seed) {
+        L.log("applySeed: " + seed.getExtras());
         SharedPreferences.Editor se = null;
         for (String[] f : FIELDS) {
             if (seed.hasExtra(f[0])) {
@@ -52,7 +52,36 @@ public class MainActivity extends Activity {
                 se.putString(f[0], seed.getStringExtra(f[0]));
             }
         }
+        if (seed.hasExtra("gazeListen")) {
+            if (se == null) se = prefs.edit();
+            se.putString("gazeListen", seed.getStringExtra("gazeListen"));
+        }
         if (se != null) se.apply();
+    }
+
+    /** activity 已在栈顶时 intent 走这里：种子配置与 autostart 照样生效。 */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        L.log("onNewIntent fired");
+        setIntent(intent);
+        applySeed(intent);
+        for (String[] f : FIELDS) {
+            EditText in = inputs.get(f[0]);
+            if (in != null) in.setText(prefs.getString(f[0], f[2]));
+        }
+        if (gazeSwitch != null) gazeSwitch.setChecked("1".equals(prefs.getString("gazeListen", "0")));
+        if (intent.hasExtra("autostart")) {
+            startForegroundService(new Intent(this, AgentService.class));
+        }
+    }
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences("cfg", MODE_PRIVATE);
+        // adb 注入配置：am start --es agentId x --es registry y --es token z --es autostart 1
+        applySeed(getIntent());
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -101,6 +130,14 @@ public class MainActivity extends Activity {
             panel.addView(input);
             inputs.put(f[0], input);
         }
+        android.widget.Switch gaze = new android.widget.Switch(this);
+        gazeSwitch = gaze;
+        gaze.setText("持续注视监听（看镜头 200ms 开始听写，移开 500ms 结束，文字进日志）");
+        gaze.setTextColor(C_TEXT);
+        gaze.setChecked("1".equals(prefs.getString("gazeListen", "0")));
+        gaze.setOnCheckedChangeListener((b, on) ->
+                prefs.edit().putString("gazeListen", on ? "1" : "0").apply());
+        panel.addView(gaze);
 
         LinearLayout btns = new LinearLayout(this);
         Button start = new Button(this);
@@ -152,6 +189,12 @@ public class MainActivity extends Activity {
         logScroll.addView(logView);
         logScroll.setPadding(dp(8), dp(8), dp(8), dp(8));
         logScroll.setFillViewport(true); // 子视图撑满整屏，空白区点击也能进配置
+        // 跟随判定：到底=true；向上滚=false；内容变高但位置没动=保持原状（不算用户滚动）
+        logScroll.setOnScrollChangeListener((v, sx, sy, osx, osy) -> {
+            int bottom = logView.getHeight() - logScroll.getHeight();
+            if (sy >= bottom - dp(24)) { logFollow = true; return; }
+            if (sy < osy) logFollow = false;
+        });
         frame.addView(logScroll, new android.widget.FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         frame.addView(panelScroll, new android.widget.FrameLayout.LayoutParams(
@@ -188,7 +231,7 @@ public class MainActivity extends Activity {
             startForegroundService(new Intent(this, AgentService.class));
         });
         stop.setOnClickListener(v -> stopService(new Intent(this, AgentService.class)));
-        if (seed.hasExtra("autostart")) {
+        if (getIntent().hasExtra("autostart")) {
             startForegroundService(new Intent(this, AgentService.class));
         }
     }
@@ -207,9 +250,11 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         logView.setText(L.all());
+        logFollow = true;
+        logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         L.setListener(line -> runOnUiThread(() -> {
             logView.append(line + "\n");
-            logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
+            if (logFollow) logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
         }));
     }
 

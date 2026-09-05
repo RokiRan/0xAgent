@@ -49,6 +49,8 @@ public class FaceTestActivity extends Activity {
 
     private TextureView preview;
     private OverlayView overlay;
+    private FrameLayout root;
+    private FrameLayout previewBox; // 按画面真实比例信箱式居中，黑边由 root 底色兜底
     private TextView status;
     private HandlerThread bg;
     private Handler bgHandler;
@@ -61,11 +63,24 @@ public class FaceTestActivity extends Activity {
     /** 重力实测的物理朝向（0/90/180/270）。显示被竖屏锁定时 display rotation 恒 0，不可信。 */
     private volatile int deviceDeg = 0;
     private android.view.OrientationEventListener orientationListener;
+    /** 最近一次虹膜视线分析结果（bg 线程写，UI 线程读）。 */
+    private volatile MeshHelper.Gaze lastMesh;
+    private int meshMs;
+    /** 进页面前 gaze listener 是否在跑（退出时按开关恢复）。 */
+    private boolean gazeWasRunning;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        FrameLayout root = new FrameLayout(this);
+        root = new FrameLayout(this);
+        // 独占冲突：持续注视监听持着前置相机时，本页打不开/被抢回（预览冻住）。
+        // 进页面先停掉它，退出时按开关恢复。
+        gazeWasRunning = GazeListener.running();
+        if (gazeWasRunning) {
+            // 异步停：shutdown 里若正在听写会 join 录音线程 + asr 收尾解码，UI 线程直调有 ANR 风险
+            new Thread(GazeListener::stop, "gaze-pause").start();
+            L.log("进入人脸测试页，已暂停持续注视监听");
+        }
         root.setBackgroundColor(C_BG);
 
         preview = new TextureView(this);
@@ -79,14 +94,19 @@ public class FaceTestActivity extends Activity {
         hint.setTextColor(0xFF9AA4B2);
         hint.setTextSize(11);
         hint.setPadding(dp(12), 0, dp(12), dp(8));
-            hint.setText("绿框=正注视（|Y|<15° |X|<20° 且双眼睁开>0.6），红框=未注视。前置画面未镜像，按传感器比例拉伸显示。");
+            hint.setText("绿框=正注视（|Y|<15° |X|<20° 且双眼睁开>0.6），红框=未注视。前置画面为自拍镜像，按传感器真实比例信箱显示。");
         FrameLayout.LayoutParams hintLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 android.view.Gravity.BOTTOM);
 
-        root.addView(preview, new FrameLayout.LayoutParams(
+        // 预览与 overlay 装进同一信箱盒子：盒子按内容真实比例（分析帧经转正后）定尺寸，
+        // 两者仍共享同一线性映射，检测框对齐关系不变
+        previewBox = new FrameLayout(this);
+        previewBox.addView(preview, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        root.addView(overlay, new FrameLayout.LayoutParams(
+        previewBox.addView(overlay, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(previewBox, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.addView(status);
         root.addView(hint, hintLp);
@@ -104,7 +124,8 @@ public class FaceTestActivity extends Activity {
         if (orientationListener.canDetectOrientation()) orientationListener.enable();
 
         preview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
-            @Override public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) { openCamera(); }
+            @Override public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) { if (gazeWasRunning) preview.postDelayed(() -> openCamera(), 800); // 等注视监听释放相机
+                else openCamera(); }
             @Override public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {}
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture st) { closeCamera(); return true; }
             @Override public void onSurfaceTextureUpdated(SurfaceTexture st) {}
@@ -114,6 +135,13 @@ public class FaceTestActivity extends Activity {
     @Override
     protected void onDestroy() {
         closeCamera();
+        // 退出恢复注视监听（以开关当前值为准：用户在页内改了开关就尊重新值）
+        boolean wantOn = "1".equals(getSharedPreferences("cfg", MODE_PRIVATE)
+                .getString("gazeListen", "0"));
+        if (gazeWasRunning && wantOn && !GazeListener.running()) {
+            GazeListener.start(this);
+            L.log("退出人脸测试页，已恢复持续注视监听");
+        }
         if (bg != null) bg.quitSafely();
         if (orientationListener != null) orientationListener.disable();
         super.onDestroy();
@@ -184,8 +212,27 @@ public class FaceTestActivity extends Activity {
                         if ((++frameSeq % 20 == 0) || ms > 200 || n != 0)
                             L.log("fast detect " + ms + "ms faces=" + n
                                     + " rot=" + ((sensorOrientation + deviceDeg) % 360));
+                        // 虹膜视线分析：有人脸时每 3 帧跑一次（YUV→位图有成本，数值变化慢不需要满帧率）
+                        if (n > 0 && frameSeq % 3 == 0) {
+                            long m0 = System.currentTimeMillis();
+                            android.graphics.Bitmap upright = uprightBitmap(img,
+                                    (sensorOrientation + deviceDeg) % 360);
+                            if (upright != null) {
+                                MeshHelper.Gaze g = MeshHelper.analyze(FaceTestActivity.this, upright);
+                                meshMs = (int) (System.currentTimeMillis() - m0);
+                                if (g != null) {
+                                    lastMesh = g;
+                                    L.log("mesh " + meshMs + "ms " + g);
+                                }
+                            }
+                        }
+                        // ML Kit 框在转正后坐标系（rawbox 与截图配对实测验证 + 用户观察转置现象）：
+                        // rot 90/270 时帧宽高互换即为 overlay 的映射尺寸，坐标本身不用再转
                         int w = img.getWidth(), h = img.getHeight();
-                        runOnUiThread(() -> showFaces(faces, w, h));
+                        int rot2 = (sensorOrientation + deviceDeg) % 360;
+                        int uw = rot2 % 180 != 0 ? h : w;
+                        int uh = rot2 % 180 != 0 ? w : h;
+                        runOnUiThread(() -> showFaces(faces, uw, uh, rot2));
                     } finally {
                         img.close();
                         busy = false;
@@ -225,7 +272,10 @@ public class FaceTestActivity extends Activity {
                         runOnUiThread(() -> status.setText("打开失败: " + e.getMessage()));
                     }
                 }
-                @Override public void onDisconnected(CameraDevice d) { d.close(); }
+                @Override public void onDisconnected(CameraDevice d) {
+                    d.close();
+                    runOnUiThread(() -> status.setText("相机被断开（可能被持续注视监听抢走，请重进本页）"));
+                }
                 @Override public void onError(CameraDevice d, int e) {
                     d.close();
                     runOnUiThread(() -> status.setText("相机错误 " + e + "（可能被其他应用占用）"));
@@ -245,14 +295,18 @@ public class FaceTestActivity extends Activity {
         }
     }
 
-    private void showFaces(List<Face> faces, int frameW, int frameH) {
+    private void showFaces(List<Face> faces, int frameW, int frameH, int rot) {
+        fitPreviewBox(frameW, frameH); // 入参已是转正后尺寸
         if (faces == null) { status.setText("检测失败/超时（见日志）"); return; }
-        overlay.setFaces(faces, frameW, frameH);
+        overlay.setFaces(faces, frameW, frameH, rot);
         if (faces.isEmpty()) { status.setText("画面中无人脸"); return; }
         int looking = 0;
         for (Face f : faces) if (FaceHelper.lookingAtCamera(f)) looking++;
-        status.setText("检测到 " + faces.size() + " 张人脸 → "
-                + (looking > 0 ? looking + " 人正注视镜头" : "没有人看镜头"));
+        String head = "检测到 " + faces.size() + " 张人脸 → "
+                + (looking > 0 ? looking + " 人正注视镜头" : "没有人看镜头");
+        MeshHelper.Gaze g = lastMesh;
+        if (g != null) head += "\n虹膜 " + g + " (" + meshMs + "ms)";
+        status.setText(head);
     }
 
     private void closeCamera() {
@@ -274,13 +328,32 @@ public class FaceTestActivity extends Activity {
     private int dp(int v) {
         return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
     }
+    /** YUV 分析帧 → 旋正位图：实现收在 MeshHelper.fromYuv（GazeListener 共用）。 */
+    private static android.graphics.Bitmap uprightBitmap(Image img, int rotationDegrees) {
+        return MeshHelper.fromYuv(img, rotationDegrees);
+    }
+    /** 信箱式适配：按转正后内容真实宽高比缩放 previewBox 居中，消除整屏拉伸。入参已是转正后尺寸。 */
+    private void fitPreviewBox(int cw, int ch) {
+        if (root == null || previewBox == null) return;
+        int vw = root.getWidth(), vh = root.getHeight();
+        if (vw == 0 || vh == 0 || cw == 0 || ch == 0) return;
+        double s = Math.min((double) vw / cw, (double) vh / ch);
+        int bw = (int) (cw * s + 0.5), bh = (int) (ch * s + 0.5);
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) previewBox.getLayoutParams();
+        if (lp.width != bw || lp.height != bh) {
+            lp.width = bw;
+            lp.height = bh;
+            lp.gravity = android.view.Gravity.CENTER;
+            previewBox.setLayoutParams(lp);
+        }
+    }
 
-    /** 检测框 overlay：坐标系 = 旋正后的分析帧，线性拉伸到视图（预览同规则拉伸，天然对齐）。 */
+    /** 检测框 overlay：ML Kit 框在转正后坐标系，x 按前置自成像镜像翻转后与帧尺寸线性映射到 previewBox。 */
     private static final class OverlayView extends View {
         private final Paint boxPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private List<Face> faces = Collections.emptyList();
-        private int frameW = 1, frameH = 1;
+        private int frameW = 1, frameH = 1, rot;
 
         OverlayView(Context ctx) {
             super(ctx);
@@ -290,17 +363,16 @@ public class FaceTestActivity extends Activity {
             textPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         }
 
-        void setFaces(List<Face> faces, int frameW, int frameH) {
+        void setFaces(List<Face> faces, int frameW, int frameH, int rot) {
             this.faces = faces == null ? Collections.<Face>emptyList() : faces;
             this.frameW = frameW;
             this.frameH = frameH;
+            this.rot = rot;
             invalidate();
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
-            float sx = (float) getWidth() / frameW;
-            float sy = (float) getHeight() / frameH;
             for (int i = 0; i < faces.size(); i++) {
                 Face f = faces.get(i);
                 boolean looking = FaceHelper.lookingAtCamera(f);
@@ -308,7 +380,11 @@ public class FaceTestActivity extends Activity {
                 boxPaint.setColor(color);
                 textPaint.setColor(color);
                 Rect b = f.getBoundingBox();
-                RectF r = new RectF(b.left * sx, b.top * sy, b.right * sx, b.bottom * sy);
+                float sx = (float) getWidth() / frameW;
+                float sy = (float) getHeight() / frameH;
+                // 前置预览相对 ML Kit 转正坐标系是水平镜像的（实测：头左移框右移）→ x 翻转
+                RectF r = new RectF((frameW - b.right) * sx, b.top * sy,
+                        (frameW - b.left) * sx, b.bottom * sy);
                 canvas.drawRect(r, boxPaint);
                 Float le = f.getLeftEyeOpenProbability();
                 Float re = f.getRightEyeOpenProbability();

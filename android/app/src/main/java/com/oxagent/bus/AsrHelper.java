@@ -10,7 +10,8 @@ import com.k2fsa.sherpa.onnx.OnlineStream;
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig;
 
 /**
- * 端侧语音识别（sherpa-onnx + 流式 zipformer 中文 14M int8 模型，完全离线）。
+ * 端侧语音识别（sherpa-onnx + 流式 zipformer 中英双语 small int8 模型，完全离线）。
+ * 模型：streaming-zipformer-small-bilingual-zh-en-2023-02-16，英文输出为大写 BPE 词。
  * 模型在 assets/asr/，首次加载 ~1-2s，识别器单例复用。
  * 本机系统识别服务（Bixby trampoline）拒绝第三方绑定（bind error 10，已实证），
  * 这是唯一可行的端侧 ASR 路线，也覆盖未来「持续监听」场景。
@@ -81,5 +82,48 @@ public class AsrHelper {
         } finally {
             if (stream != null) stream.release();
         }
+    }
+
+    /** 流式听写会话：持续 feed 16kHz mono PCM16 块，finish() 冲刷端点取最终文字。GazeListener 用。 */
+    public static class Session {
+        private final OnlineRecognizer rec;
+        private final OnlineStream stream;
+
+        private Session(OnlineRecognizer rec) {
+            this.rec = rec;
+            this.stream = rec.createStream("");
+        }
+
+        public synchronized void feed(byte[] pcm, int len) {
+            int n = len / 2;
+            float[] samples = new float[n];
+            for (int i = 0; i < n; i++) {
+                samples[i] = (short) ((pcm[2 * i + 1] << 8) | (pcm[2 * i] & 0xff)) / 32768.0f;
+            }
+            stream.acceptWaveform(samples, 16000);
+            while (rec.isReady(stream)) {
+                rec.decode(stream);
+            }
+        }
+
+        /** 补 1s 静音冲刷端点，返回最终文字。 */
+        public synchronized String finish() {
+            stream.acceptWaveform(new float[16000], 16000);
+            stream.inputFinished();
+            while (rec.isReady(stream)) {
+                rec.decode(stream);
+            }
+            return rec.getResult(stream).getText();
+        }
+
+        public synchronized void release() {
+            try { stream.release(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 开始一段流式听写；asr 不可用返回 null。 */
+    public static Session beginSession(Context ctx) {
+        OnlineRecognizer rec = get(ctx);
+        return rec == null ? null : new Session(rec);
     }
 }
