@@ -6,7 +6,9 @@
 
 import { Transport, BusMessage } from './bus.js';
 import { createServer, request as httpRequest, IncomingMessage, ServerResponse, Server } from 'http';
-import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, appendFileSync, mkdirSync } from 'fs';
+import { randomBytes } from 'crypto';
+import { join } from 'path';
 
 export interface HttpTransportConfig {
   agentId: string;
@@ -389,6 +391,13 @@ export interface RegistryOptions {
    * 不计入 rounds、不被其他 agent 看到。Empty = endpoint disabled (405).
    */
   ledgerFile?: string;
+  /**
+   * Directory for POST /upload binary payloads (photos etc.); GET /files/<name>
+   * serves from it. Empty = endpoints disabled (405). Files land under random
+   * names, so URLs are unguessable; still behind the token gate like every
+   * other endpoint (gateways proxy with the token server-side).
+   */
+  uploadsDir?: string;
 }
 
 interface PersistedState {
@@ -482,6 +491,52 @@ export function createRegistryServer(port = 9876, options: RegistryOptions = {})
     // Token gate: when BUS_TOKEN is set, every endpoint requires it
     if (options.token && req.headers['x-bus-token'] !== options.token) {
       sendJson(401, { error: 'Unauthorized' });
+      return;
+    }
+
+
+    // POST /upload?name=<file> — binary payload → uploadsDir, returns /files/<stored> URL.
+    // Binary-safe: Buffer chunks end-to-end (collectBody would UTF-8-mangle JPEGs).
+    if (req.method === 'POST' && req.url?.startsWith('/upload')) {
+      if (!options.uploadsDir) { sendJson(405, { error: 'Uploads not enabled' }); return; }
+      const url = new URL(req.url, 'http://localhost');
+      const origName = url.searchParams.get('name') ?? 'file';
+      const mime = req.headers['x-file-mime'];
+      const extMatch = origName.toLowerCase().match(/\.([a-z0-9]{1,8})$/);
+      const stored = randomBytes(12).toString('hex') + (extMatch ? extMatch[0] : '');
+      collectBinary(req, 20 * 1024 * 1024, (buf, err) => {
+        if (err || !buf) { sendJson(413, { error: err ?? 'No body' }); return; }
+        try {
+          mkdirSync(options.uploadsDir!, { recursive: true });
+          writeFileSync(join(options.uploadsDir!, stored), buf);
+          sendJson(200, {
+            ok: true,
+            url: `/files/${stored}`,
+            size: buf.length,
+            mime: typeof mime === 'string' && mime ? mime : (UPLOAD_MIME[extMatch?.[1] ?? ''] ?? 'application/octet-stream'),
+          });
+        } catch (e) {
+          sendJson(500, { error: `Upload save failed: ${String(e)}` });
+        }
+      });
+      return;
+    }
+
+    // GET /files/<name> — serve an uploaded file (strict name, mime by extension)
+    if (req.method === 'GET' && req.url?.startsWith('/files/')) {
+      if (!options.uploadsDir) { sendJson(405, { error: 'Uploads not enabled' }); return; }
+      const name = req.url.slice('/files/'.length).split('?')[0];
+      if (!/^[A-Za-z0-9._-]+$/.test(name) || name.includes('..')) {
+        sendJson(400, { error: 'Invalid file name' });
+        return;
+      }
+      const full = join(options.uploadsDir, name);
+      if (!existsSync(full)) { sendJson(404, { error: 'File not found' }); return; }
+      const extMatch = name.toLowerCase().match(/\.([a-z0-9]{1,8})$/);
+      const mime = UPLOAD_MIME[extMatch?.[1] ?? ''] ?? 'application/octet-stream';
+      // Random content-named URLs are immutable; let gateways/browsers cache hard.
+      res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'public, max-age=31536000, immutable' });
+      res.end(readFileSync(full));
       return;
     }
 
@@ -894,4 +949,43 @@ function collectBody(req: IncomingMessage, callback: (body: string) => void): vo
   let body = '';
   req.on('data', (chunk) => { body += chunk; });
   req.on('end', () => callback(body));
+}
+
+const UPLOAD_MIME: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
+  wav: 'audio/wav',
+  m4a: 'audio/mp4',
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  json: 'application/json',
+};
+
+/** Binary body collector with a hard cap — upload path only; never UTF-8-decode. */
+function collectBinary(
+  req: IncomingMessage,
+  maxBytes: number,
+  callback: (buf: Buffer | null, err?: string) => void,
+): void {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let overflow = false;
+  req.on('data', (chunk: Buffer) => {
+    total += chunk.length;
+    if (total > maxBytes) {
+      overflow = true;
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (overflow) callback(null, `Body exceeds ${maxBytes} bytes`);
+    else callback(Buffer.concat(chunks));
+  });
+  req.on('error', () => callback(null, 'Request stream error'));
 }

@@ -67,6 +67,10 @@ chatDb.exec(`CREATE TABLE IF NOT EXISTS room_messages (
   ts INTEGER NOT NULL
 )`);
 chatDb.exec('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages(room, id)');
+// Schema migration for existing DBs (SQLite has no IF NOT EXISTS for columns)
+for (const ddl of ['ALTER TABLE room_messages ADD COLUMN image TEXT']) {
+  try { chatDb.exec(ddl); } catch { /* column already exists */ }
+}
 // 设置持久化（contract §3）：key/value 表，启动时读出 userName/contextTokens 注入 gateway。
 chatDb.exec(`CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -129,11 +133,11 @@ if (REGISTRY_URL && harness.server) {
   };
 
   // chatDb + room_messages created above (before harness); reuse here.
-  const insertMsg = chatDb.prepare('INSERT INTO room_messages (room, sender, kind, text, ts) VALUES (?, ?, ?, ?, ?)');
-  const loadMsg = chatDb.prepare('SELECT room, sender, kind, text, ts FROM room_messages WHERE room = ? ORDER BY id DESC LIMIT ?');
+  const insertMsg = chatDb.prepare('INSERT INTO room_messages (room, sender, kind, text, ts, image) VALUES (?, ?, ?, ?, ?, ?)');
+  const loadMsg = chatDb.prepare('SELECT room, sender, kind, text, ts, image FROM room_messages WHERE room = ? ORDER BY id DESC LIMIT ?');
   startRetention(chatDb);
   // Row shape returned by better-sqlite3 .all(); boundary cast, column names are authoritative
-  interface MsgRow { room: string; sender: string; kind: RoomMessage['kind']; text: string; ts: number }
+  interface MsgRow { room: string; sender: string; kind: RoomMessage['kind']; text: string; ts: number; image: string | null }
 
   // 设置持久化：启动时读 settings 表，env 仅作 fallback（DB 优先；写操作热生效）。
   const loadSetting = (key: string): string | undefined => {
@@ -171,13 +175,43 @@ if (REGISTRY_URL && harness.server) {
     // future-you（cumora §9.2.1）: agent 经 bus request 排定时唤醒（lazy closure，同 isFocused）
     createReminder: (room, agentId, prompt, scheduledFor) => reminderBoard.create(room, agentId, prompt, scheduledFor),
     store: {
-      insert: (m) => { insertMsg.run(m.room, m.from, m.kind, m.text, m.ts); },
+      insert: (m) => { insertMsg.run(m.room, m.from, m.kind, m.text, m.ts, m.image ?? null); },
       load: (room, limit) =>
         (loadMsg.all(room, limit) as MsgRow[])
           .reverse()
-          .map((r) => ({ room: r.room, from: r.sender, kind: r.kind, text: r.text, ts: r.ts })),
+          .map((r) => ({ room: r.room, from: r.sender, kind: r.kind, text: r.text, image: r.image ?? undefined, ts: r.ts })),
     },
   });
+  // Token-free image proxy: browser <img> can't send x-bus-token, so the gateway
+  // fetches registry /files/<name> server-side and re-serves it under /bus-files/.
+  harness.staticFileServer?.addRoute('/bus-files/', async (_req, res, sub) => {
+    const name = sub.split('?')[0];
+    if (!/^[A-Za-z0-9._-]+$/.test(name) || name.includes('..')) {
+      res.writeHead(400);
+      res.end('Invalid file name');
+      return true;
+    }
+    try {
+      const upstream = await fetch(`${REGISTRY_URL}/files/${name}`, {
+        headers: process.env.BUS_TOKEN ? { 'x-bus-token': process.env.BUS_TOKEN } : {},
+      });
+      if (!upstream.ok) {
+        res.writeHead(upstream.status);
+        res.end(await upstream.text());
+        return true;
+      }
+      res.writeHead(200, {
+        'Content-Type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      });
+      res.end(Buffer.from(await upstream.arrayBuffer()));
+    } catch (err) {
+      res.writeHead(502);
+      res.end(String(err));
+    }
+    return true;
+  });
+
   await busGateway.connect();
   busGateway.onRoomMessage((msg) => {
     appServer.broadcast(createNotification('room/message', msg));

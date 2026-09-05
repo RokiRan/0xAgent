@@ -16,16 +16,38 @@ export interface StaticServerConfig {
   publicDir?: string;
 }
 
+export type StaticRouteHandler = (
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  /** req.url with the route prefix stripped (query string still attached). */
+  subPath: string,
+) => Promise<boolean> | boolean;
+
 export class StaticServer {
   server?: http.Server;
+  private routes: Array<{ prefix: string; handler: StaticRouteHandler }> = [];
 
   constructor(private config: StaticServerConfig) {}
+
+  /**
+   * Register a prefix route consulted BEFORE static file serving.
+   * Handler returns true when it has answered the request; false falls through.
+   */
+  addRoute(prefix: string, handler: StaticRouteHandler): void {
+    this.routes.push({ prefix, handler });
+  }
 
   async start(): Promise<void> {
     const publicDir = this.config.publicDir ?? path.join(__dirname, '../../public');
 
     this.server = http.createServer(async (req, res) => {
       const url = req.url ?? '/';
+      const pathOnly = url.split('?')[0];
+      for (const route of this.routes) {
+        if (pathOnly.startsWith(route.prefix)) {
+          if (await route.handler(req, res, pathOnly.slice(route.prefix.length))) return;
+        }
+      }
       const filePath = url === '/' ? '/index.html' : url;
       const fullPath = path.join(publicDir, filePath);
 

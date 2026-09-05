@@ -17,6 +17,8 @@ export interface RoomMessage {
   from: string;
   kind: 'user' | 'agent' | 'system';
   text: string;
+  /** Local proxy URL (/bus-files/<name>) for an attached image; undefined for plain text. */
+  image?: string;
   ts: number;
 }
 
@@ -609,7 +611,7 @@ export class BusGateway {
     const from = opts.from ?? this.userName;
     const human = opts.human ?? true;
     this.bus
-      .request(target, { kind: 'chat', room, from, human, text, context }, this.requestTimeoutMs)
+      .request(target, { kind: 'chat', room, from, human, text, context }, this.requestTimeoutMs, room)
       .then((res) => {
         const replyText = this.extractReplyText(res);
         this.emit({ room, from: target, kind: 'agent', text: replyText, ts: Date.now() });
@@ -655,8 +657,20 @@ export class BusGateway {
     const room = msg.channel ?? 'default';
     const payload = msg.payload;
     if (payload && typeof payload === 'object' && 'kind' in payload && payload.kind === 'chat' && 'text' in payload && typeof payload.text === 'string') {
-      this.emit({ room, from: msg.from, kind: 'agent', text: payload.text, ts: Date.now() });
+      const att = 'attachment' in payload ? payload.attachment : undefined;
+      const image =
+        att && typeof att === 'object' && 'type' in att && att.type === 'image' && 'url' in att
+          ? BusGateway.imageProxyPath(att.url)
+          : undefined;
+      this.emit({ room, from: msg.from, kind: 'agent', text: payload.text, image, ts: Date.now() });
     }
+  }
+
+  /** Registry file URL (/files/<name>) → local token-free proxy path; anything else dropped. */
+  private static imageProxyPath(url: unknown): string | undefined {
+    if (typeof url !== 'string') return undefined;
+    const m = url.match(/^\/files\/([A-Za-z0-9._-]+)$/);
+    return m && !m[1].includes('..') ? `/bus-files/${m[1]}` : undefined;
   }
 
   private extractReplyText(res: unknown): string {

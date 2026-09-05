@@ -157,7 +157,7 @@ export class AgentBusImpl implements AgentBus {
     await this.transport.send(msg);
   }
 
-  async request<T = unknown>(to: string, payload: unknown, timeoutMs = 30000): Promise<T> {
+  async request<T = unknown>(to: string, payload: unknown, timeoutMs = 30000, channel?: string): Promise<T> {
     const id = this.generateId();
     const correlationId = id;
 
@@ -178,6 +178,10 @@ export class AgentBusImpl implements AgentBus {
         correlationId,
         timestamp: Date.now(),
       };
+      // Room-scoped requests MUST carry the room channel: the transport otherwise
+      // stamps its primary channel ('default'), and the registry's human-reset /
+      // membership bookkeeping then lands on the wrong channel state.
+      if (channel) msg.channel = channel;
       this.transport.send(msg).catch((err) => {
         clearTimeout(timer);
         this.pending.delete(correlationId);

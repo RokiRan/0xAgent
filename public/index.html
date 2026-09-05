@@ -884,6 +884,15 @@
     }
 
     .message.system .message-body { color: var(--warning); font-style: italic; }
+    /* 图片附件（registry /bus-files 代理） */
+    .chat-image {
+      display: block;
+      max-width: min(360px, 100%);
+      max-height: 320px;
+      border-radius: var(--radius);
+      margin-top: 6px;
+      cursor: zoom-in;
+    }
 
     /* @mention */
     .mention {
@@ -1583,6 +1592,15 @@
         renderMessageContent(body, { role: 'assistant', content: m.text, createdAt: m.ts });
       } else {
         appendTextWithMentions(body, m.text);
+      }
+      if (m.image) {
+        const img = document.createElement('img');
+        img.className = 'chat-image';
+        img.src = m.image;
+        img.loading = 'lazy';
+        img.referrerPolicy = 'no-referrer'; // 防 URL 将来改绝对地址时路径经 Referer 泄漏
+        img.onclick = () => window.open(m.image, '_blank');
+        body.appendChild(img);
       }
 
       content.appendChild(body);

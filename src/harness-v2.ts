@@ -156,6 +156,11 @@ export class HarnessV2 {
     return this.appServer;
   }
 
+  /** Static file server when webUI is enabled — callers may addRoute() proxies onto it. */
+  get staticFileServer(): StaticServer | undefined {
+    return this.staticServer;
+  }
+
   get kernelInstance(): Kernel {
     return this.kernel;
   }

@@ -53,6 +53,8 @@ public class AgentService extends Service {
     private int pollTick;
 
     private String agentId, registry, token, channel, mmKey, mmModel, persona;
+    /** operatorLoop 执行中的任务来源频道；send_photo 的播报落点，任务结束清空。 */
+    private volatile String activeRoom;
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
@@ -192,6 +194,10 @@ public class AgentService extends Service {
         if (payload == null) payload = new JSONObject();
         String kind = payload.optString("kind", "");
         String room = msg.optString("channel", "");
+        // 直连 relay 的 channel 是发送方 transport 的主渠道（web-gateway 为 default），不可信；
+        // chat 负载自带 room（gateway 契约），优先采用，兜底回自己的主频道。
+        if (room.isEmpty() || "default".equals(room)) room = payload.optString("room", "");
+        if (room.isEmpty() || "default".equals(room)) room = channel;
         String from = msg.optString("from");
         L.log("request from " + msg.optString("from") + " kind=" + (kind.isEmpty() ? "text" : kind));
 
@@ -302,9 +308,14 @@ public class AgentService extends Service {
     }
 
     private void broadcastChat(String room, String text) throws Exception {
+        broadcastChat(room, text, null);
+    }
+
+    private void broadcastChat(String room, String text, JSONObject attachment) throws Exception {
         JSONObject payload = new JSONObject()
                 .put("kind", "chat").put("room", room)
                 .put("from", agentId).put("text", text);
+        if (attachment != null) payload.put("attachment", attachment);
         JSONObject m = envelope("event", "broadcast", payload).put("channel", room);
         try {
             post("/broadcast", m);
@@ -357,6 +368,7 @@ public class AgentService extends Service {
 
     /** 看屏→决策→操作的工具循环。模型不调用工具 = 任务完成，content 即结论。 */
     private String operatorLoop(String task, String room) throws Exception {
+        activeRoom = room;
         wakeScreen();
         // 整个操作期间保持亮屏（视觉全靠截图，息屏=瞎）
         @SuppressWarnings("deprecation")
@@ -402,6 +414,7 @@ public class AgentService extends Service {
         }
         return "操作步数达到上限，当前状态:\n" + screenContext();
         } finally {
+            activeRoom = null;
             if (screenLock.isHeld()) screenLock.release();
         }
     }
@@ -494,7 +507,8 @@ public class AgentService extends Service {
                 + "打开应用用 open_app（中文名）。"
                 + "通用能力：调任何 HTTP API 用 http_request；任务产出用 file_write 落盘到工作目录，"
                 + "file_read 读取、file_list 列目录；重要结论或主人偏好用 remember 记入长期备忘；"
-                + "要把文件发给主人：file_write 后调 share_file 调出分享面板，再按屏幕操作选目标应用。"
+                + "要把照片/图片发到频道给主人看：send_photo（直接显示在 webui 上）；"
+                + "其他文件要发到手机上的应用：share_file 调出分享面板，再按屏幕操作选目标应用。"
                 + "感知能力：notifications 读最近系统通知；device_status 查电量/网络/前台应用；"
                 + "web_search 联网查资料；schedule_task 安排定时任务（到点自动执行并播报），"
                 + "schedule_list/schedule_cancel 管理；clipboard_read 读剪贴板。"
@@ -545,6 +559,7 @@ public class AgentService extends Service {
                 + "{\"type\":\"function\",\"function\":{\"name\":\"file_list\",\"description\":\"列出工作目录文件（可选子目录）\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"可选，默认根目录\"}}}}},"
                 + "{\"type\":\"function\",\"function\":{\"name\":\"remember\",\"description\":\"把重要事实/结论写入长期备忘（下次任务自动带上）\",\"parameters\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}}},"
                 + "{\"type\":\"function\",\"function\":{\"name\":\"share_file\",\"description\":\"调出系统分享面板把工作目录里的文件发出去（配合屏幕操作选微信等）\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}}},"
+                + "{\"type\":\"function\",\"function\":{\"name\":\"send_photo\",\"description\":\"把工作目录里的图片（如 camera_look 拍的 photos/cam_xxx.jpg）上传并发到当前频道，主人能在 webui 直接看到\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"工作目录相对路径，如 photos/cam_123.jpg\"}},\"required\":[\"path\"]}}},"
                 + "{\"type\":\"function\",\"function\":{\"name\":\"notifications\",\"description\":\"读取最近收到的系统通知（新→旧，含来源应用/标题/内容）\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}},"
                 + "{\"type\":\"function\",\"function\":{\"name\":\"schedule_task\",\"description\":\"安排一个定时任务：到点自动执行 prompt 并把结果播报进频道\",\"parameters\":{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"到点要执行的任务描述\"},\"delay_minutes\":{\"type\":\"integer\",\"description\":\"多少分钟后执行，与 at 二选一\"},\"at\":{\"type\":\"string\",\"description\":\"格式 yyyy-MM-dd HH:mm，与 delay_minutes 二选一\"}},\"required\":[\"task\"]}}},"
                 + "{\"type\":\"function\",\"function\":{\"name\":\"schedule_list\",\"description\":\"列出未到期的定时任务\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}},"
@@ -639,7 +654,7 @@ public class AgentService extends Service {
                 : "看这张照片回答问题：" + question + "。直接回答，不要分析过程。";
         String vision = visionAsk(b64, prompt);
         return "照片已拍（" + (front ? "前置" : "后置") + "，" + shot.width + "x" + shot.height
-                + "，存 photos/" + f.getName() + "，可 share_file 发出）\n[端侧人脸检测] " + faces
+                + "，存 photos/" + f.getName() + "，可 send_photo 发到频道）\n[端侧人脸检测] " + faces
                 + "\n[视觉描述] " + vision;
     }
 
@@ -685,6 +700,7 @@ public class AgentService extends Service {
             case "file_list":    return fileList(args.optString("path", ""));
             case "remember":     memory.addNote(args.getString("text")); return "ok 已记住";
             case "share_file":   return shareFile(args.getString("path"));
+            case "send_photo":   return sendPhoto(args.getString("path"));
             case "notifications": return NotifyService.snapshot();
             case "schedule_task": return scheduleTask(args);
             case "schedule_list": return schedules.describe();
@@ -810,6 +826,53 @@ public class AgentService extends Service {
             String rel = root.toURI().relativize(k.toURI()).getPath();
             sb.append(rel).append(k.isDirectory() ? "/" : " (" + k.length() + "B)").append('\n');
             if (k.isDirectory()) listInto(k, root, sb, depth + 1);
+        }
+    }
+
+    /** send_photo：上传工作目录图片到 registry，再带 attachment 播报进频道（webui 直接渲染）。 */
+    private String sendPhoto(String path) throws Exception {
+        String room = (activeRoom == null || activeRoom.isEmpty()) ? channel : activeRoom;
+        if (room == null || room.isEmpty()) return "失败：当前不在任何频道，无处可发";
+        java.io.File f = safeFile(path);
+        if (f == null) return "拒绝：路径越界";
+        if (!f.exists() || !f.isFile()) return "文件不存在: " + path;
+        String url = uploadFile(f);
+        broadcastChat(room, "📷 " + f.getName(), new JSONObject()
+                .put("type", "image").put("url", url).put("name", f.getName()));
+        return "ok 已发到频道 " + room + ": " + url;
+    }
+
+    /** 二进制上传到 registry /upload（不走 httpRaw：那会按 UTF-8 字符串毁图）。 */
+    private String uploadFile(java.io.File f) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(
+                registry + "/upload?name=" + java.net.URLEncoder.encode(f.getName(), "UTF-8"))
+                .openConnection();
+        try {
+            c.setRequestMethod("POST");
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(60000);
+            c.setRequestProperty("Content-Type", "application/octet-stream");
+            c.setRequestProperty("x-file-mime", mime(f.getName()));
+            if (!token.isEmpty()) c.setRequestProperty("x-bus-token", token);
+            c.setDoOutput(true);
+            c.setFixedLengthStreamingMode(f.length()); // chunked 上传会卡死（已实证）
+            OutputStream os = c.getOutputStream();
+            FileInputStream in = new FileInputStream(f);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) != -1) os.write(buf, 0, n);
+            in.close();
+            os.close();
+            int code = c.getResponseCode();
+            InputStream is = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            String resp = is == null ? "" : readAll(is);
+            if (code >= 300) {
+                throw new java.io.IOException("HTTP " + code + ": "
+                        + resp.substring(0, Math.min(200, resp.length())));
+            }
+            return new JSONObject(resp).getString("url");
+        } finally {
+            c.disconnect();
         }
     }
 
