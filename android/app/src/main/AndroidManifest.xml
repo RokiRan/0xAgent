@@ -29,6 +29,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 人脸检测可视化测试页：竖屏锁定，预览与检测框同坐标系 -->
+        <activity
+            android:name=".FaceTestActivity"
+            android:screenOrientation="portrait"
+            android:exported="false" />
         <!-- 手合并自 play-services-base：ML Kit 错误恢复对话框 -->
         <activity
             android:name="com.google.android.gms.common.api.GoogleApiActivity"

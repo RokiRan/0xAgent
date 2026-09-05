@@ -135,6 +135,13 @@ public class MainActivity extends Activity {
         a11y.setOnClickListener(v ->
                 startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         panel.addView(a11y);
+        Button faceTest = new Button(this);
+        faceTest.setText("人脸检测测试（前置实时预览）");
+        faceTest.setBackgroundColor(C_BTN);
+        faceTest.setTextColor(C_TEXT);
+        faceTest.setOnClickListener(v ->
+                startActivity(new Intent(this, FaceTestActivity.class)));
+        panel.addView(faceTest);
         logView = new TextView(this);
         logView.setTextSize(11);
         logView.setTypeface(Typeface.MONOSPACE);

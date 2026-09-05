@@ -126,14 +126,8 @@ public class CameraHelper {
             }
             if (jpeg == null) throw new Exception("相机无画面输出");
 
-            Bitmap bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+            Bitmap bmp = decodeUpright(jpeg);
             if (bmp == null) throw new Exception("相机帧解码失败");
-            int rot = exifRotation(jpeg);
-            if (rot != 0) {
-                Matrix m = new Matrix();
-                m.postRotate(rot);
-                bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
-            }
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             bmp.compress(Bitmap.CompressFormat.JPEG, 85, out);
             Shot s = new Shot();
@@ -147,6 +141,19 @@ public class CameraHelper {
             reader.close();
             ht.quitSafely();
         }
+    }
+
+    /** JPEG 解码 + 按 EXIF 旋正（capture 与人脸测试页共用）。失败返回 null。 */
+    static Bitmap decodeUpright(byte[] jpeg) {
+        Bitmap bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+        if (bmp == null) return null;
+        int rot = exifRotation(jpeg);
+        if (rot != 0) {
+            Matrix m = new Matrix();
+            m.postRotate(rot);
+            bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.getWidth(), bmp.getHeight(), m, true);
+        }
+        return bmp;
     }
 
     private static int exifRotation(byte[] jpeg) {
