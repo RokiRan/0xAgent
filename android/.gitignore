@@ -5,3 +5,19 @@ bus-agent.apk.idsig
 
 # libs/x_* 是 build.sh 从 *.aar 幂等解出的中间目录
 libs/x_*/
+
+# Gradle / Android Studio / NDK
+.gradle/
+.idea/
+*.iml
+.kotlin/
+.cxx/
+.externalNativeBuild/
+captures/
+local.properties
+
+# 签名材料 —— 不入仓，包括 debug keystore（避免被冒名签包）
+*.keystore
+*.jks
+*.p12
+key.properties

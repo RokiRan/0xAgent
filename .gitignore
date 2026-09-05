@@ -1,6 +1,6 @@
 # Dependencies
 node_modules/
-package-lock.json
+# package-lock.json 必须提交 —— 用 npm，保证 CI/协作者装出同样的版本树
 yarn.lock
 pnpm-lock.yaml
 
@@ -15,9 +15,10 @@ build/
 .env.*.local
 
 # Database
-*.db
-*.db-journal
-data/
+data/*.db
+data/*.db-journal
+# 项目里 data/ 只放运行时 sqlite；如果以后要放 seed/fixtures/migrations，
+# 再加 !data/seed/ !data/migrations/ 例外放行
 
 # IDE
 .vscode/
