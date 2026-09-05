@@ -60,9 +60,6 @@
             <meta-data
                 android:name="com.google.firebase.components:com.google.mlkit.vision.face.internal.FaceRegistrar"
                 android:value="com.google.firebase.components.ComponentRegistrar" />
-            <meta-data
-                android:name="com.google.firebase.components:com.google.mlkit.vision.facemesh.internal.FaceMeshRegistrar"
-                android:value="com.google.firebase.components.ComponentRegistrar" />
         </service>
 
         <!-- 手合并自 mlkit common：ML Kit 组件初始化，缺了 getClient 会崩 -->
