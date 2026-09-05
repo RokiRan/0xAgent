@@ -179,6 +179,13 @@ public class MainActivity extends Activity {
         faceTest.setOnClickListener(v ->
                 startActivity(new Intent(this, FaceTestActivity.class)));
         panel.addView(faceTest);
+        Button asrTest = new Button(this);
+        asrTest.setText("语音识别测试（按住说话）");
+        asrTest.setBackgroundColor(C_BTN);
+        asrTest.setTextColor(C_TEXT);
+        asrTest.setOnClickListener(v ->
+                startActivity(new Intent(this, AsrTestActivity.class)));
+        panel.addView(asrTest);
         logView = new TextView(this);
         logView.setTextSize(11);
         logView.setTypeface(Typeface.MONOSPACE);

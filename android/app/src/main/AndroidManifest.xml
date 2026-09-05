@@ -35,6 +35,11 @@
             android:name=".FaceTestActivity"
             android:screenOrientation="portrait"
             android:exported="false" />
+        <!-- 语音识别测试页：按住说话，松开出结果 -->
+        <activity
+            android:name=".AsrTestActivity"
+            android:screenOrientation="portrait"
+            android:exported="false" />
         <!-- 手合并自 play-services-base：ML Kit 错误恢复对话框 -->
         <activity
             android:name="com.google.android.gms.common.api.GoogleApiActivity"

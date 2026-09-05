@@ -23,7 +23,7 @@ public class MicHelper {
             return "无麦克风权限（adb shell pm grant com.oxagent.bus android.permission.RECORD_AUDIO）";
         }
         if (seconds < 2) seconds = 2;
-        if (seconds > 30) seconds = 30;
+        if (seconds > 120) seconds = 120;
 
         int rate = 16000;
         byte[] pcm = new byte[rate * 2 * seconds];
