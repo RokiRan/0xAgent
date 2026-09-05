@@ -8,6 +8,7 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.MotionEvent;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -41,6 +42,10 @@ public class MainActivity extends Activity {
     /** 日志是否钉在底部跟随滚动；用户上翻即解除，回到底部恢复。 */
     private boolean logFollow = true;
     private android.widget.Switch gazeSwitch;
+    /** 防烧屏：30s 无任何触摸盖上全黑层；点一下揭开回日志页并重新计时。 */
+    private View blackView;
+    private android.os.Handler idleHandler;
+    private Runnable blackout;
 
     /** adb 注入配置（am start --es ...），onCreate 与 onNewIntent 共用。 */
     private void applySeed(Intent seed) {
@@ -209,25 +214,37 @@ public class MainActivity extends Activity {
                 android.view.Gravity.TOP));
         root.addView(frame, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        // 全黑防烧屏层：盖在最上面，点击即揭开（这次点击不会穿透到日志/配置）
+        blackView = new View(this);
+        blackView.setBackgroundColor(0xFF000000);
+        blackView.setVisibility(View.GONE);
+        blackView.setOnClickListener(v -> blackView.setVisibility(View.GONE));
+        frame.addView(blackView, new android.widget.FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         // 展开/收起 + 30s 无操作自动返回
-        android.os.Handler idle = new android.os.Handler(android.os.Looper.getMainLooper());
+        idleHandler = new android.os.Handler(android.os.Looper.getMainLooper());
         Runnable autoBack = () -> panelScroll.setVisibility(View.GONE);
+        blackout = () -> {
+            idleHandler.removeCallbacks(autoBack);
+            panelScroll.setVisibility(View.GONE);
+            blackView.setVisibility(View.VISIBLE);
+        };
         View.OnClickListener open = v -> {
             panelScroll.setVisibility(View.VISIBLE);
-            idle.removeCallbacks(autoBack);
-            idle.postDelayed(autoBack, 30_000);
+            idleHandler.removeCallbacks(autoBack);
+            idleHandler.postDelayed(autoBack, 30_000);
         };
         logScroll.setOnClickListener(open);
         logView.setOnClickListener(open);
         back.setOnClickListener(v -> {
-            idle.removeCallbacks(autoBack);
+            idleHandler.removeCallbacks(autoBack);
             panelScroll.setVisibility(View.GONE);
         });
         // 面板上的任何触摸都重置 30s 计时
         panelScroll.setOnTouchListener((v, ev) -> {
-            idle.removeCallbacks(autoBack);
-            idle.postDelayed(autoBack, 30_000);
+            idleHandler.removeCallbacks(autoBack);
+            idleHandler.postDelayed(autoBack, 30_000);
             return false;
         });
 
@@ -243,6 +260,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 任何触摸都重置防烧屏 30s 计时（分发前拦截，不影响原有点击/滚动语义）。 */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (idleHandler != null && blackout != null) {
+            idleHandler.removeCallbacks(blackout);
+            idleHandler.postDelayed(blackout, 30_000);
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
     private void saveAll() {
         SharedPreferences.Editor e = prefs.edit();
         for (String[] f : FIELDS) {
@@ -256,6 +283,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        blackView.setVisibility(View.GONE);
+        idleHandler.removeCallbacks(blackout);
+        idleHandler.postDelayed(blackout, 30_000);
         logView.setText(L.all());
         logFollow = true;
         logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));

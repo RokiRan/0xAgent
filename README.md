@@ -169,6 +169,10 @@ npm run registry
 #    见 src/mcp/plugin.ts；无独立 npm script
 ```
 
+### 安卓 Bus Agent App（`android/`）
+
+把安卓手机变成总线上的 agent 实例：无障碍操作手机、三层读屏（a11y→端侧 OCR→云端视觉）、注视听写、端侧离线 ASR、拍照回传渠道。纯 Java 免 Gradle 手搓构建（`android/build.sh`），详见 [android/README.md](android/README.md)。变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+
 ### 最小代码示例
 
 ```typescript
